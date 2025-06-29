@@ -377,10 +377,16 @@ class InsightEngine:
                 result = await session.run(query)
 
                 async for record in result:
-                    entities.append(record['entity_id'])
-                    descriptions.append(record['description'])
+                    entity_id = record['entity_id']
+                    description = record['description']
+
+                    # Only add entities with valid descriptions
+                    if entity_id and description and isinstance(description, str) and description.strip():
+                        entities.append(entity_id)
+                        descriptions.append(description.strip())
 
             if len(descriptions) < 3:
+                logger.debug(f"Not enough entities with descriptions for clustering: {len(descriptions)}")
                 return patterns
 
             # Calculate TF-IDF vectors
@@ -405,14 +411,17 @@ class InsightEngine:
                     clusters[label].append(entities[i])
 
                 for cluster_id, cluster_entities in clusters.items():
-                    if len(cluster_entities) >= 2:
-                        patterns.append({
-                            'type': 'semantic_cluster',
-                            'pattern_id': f"semantic_cluster_{cluster_id}",
-                            'entities': cluster_entities,
-                            'size': len(cluster_entities),
-                            'confidence': 0.6
-                        })
+                    if len(cluster_entities) >= 2 and cluster_entities:  # Ensure we have valid entities
+                        # Filter out any None values from cluster_entities
+                        valid_entities = [e for e in cluster_entities if e is not None]
+                        if valid_entities:
+                            patterns.append({
+                                'type': 'semantic_cluster',
+                                'pattern_id': f"semantic_cluster_{cluster_id}",
+                                'entities': valid_entities,
+                                'size': len(valid_entities),
+                                'confidence': 0.6
+                            })
 
             return patterns
 
@@ -447,24 +456,40 @@ class InsightEngine:
         # Get entity names for the nodes in the community
         entity_names = await self._get_entity_names(nodes)
 
+        # Fallback to node IDs if no entity names found
+        if not entity_names:
+            entity_names = [f"entity_{node}" for node in nodes[:5] if node]
+
+        # Ensure we have at least one valid name
+        if not entity_names:
+            entity_names = [f"community_{pattern.get('pattern_id', 'unknown')}"]
+
+        # Ensure we have at least one name for the title
+        primary_name = entity_names[0] if entity_names else f"community_{pattern.get('pattern_id', 'unknown')}"
+
+        # Clean entity names for display (filter out any remaining None/empty values)
+        display_names = [name for name in entity_names if name and isinstance(name, str) and name.strip()]
+        if not display_names:
+            display_names = [primary_name]
+
         insight_content = f"""Discovered a cluster of {len(nodes)} interconnected entities that form a coherent knowledge community.
 
 Key entities in this cluster:
-{', '.join(entity_names[:5])}{'...' if len(entity_names) > 5 else ''}
+{', '.join(display_names[:5])}{'...' if len(display_names) > 5 else ''}
 
 This clustering suggests these entities share common themes, relationships, or contextual significance that may not be immediately obvious from individual examination. The strength of their interconnections indicates they should be considered together when analyzing related topics."""
 
         return {
             'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
-            'title': f"Knowledge Community: {entity_names[0]} cluster",
+            'title': f"Knowledge Community: {primary_name} cluster",
             'content': insight_content,
-            'topic': entity_names[0] if entity_names else 'unknown',
+            'topic': primary_name,
             'confidence': pattern['confidence'],
             'pattern_type': 'community_detection',
             'evidence': await self._get_evidence_for_nodes(nodes),
             'metadata': {
                 'community_size': len(nodes),
-                'entity_count': len(entity_names),
+                'entity_count': len(display_names),
                 'pattern_id': pattern['pattern_id']
             }
         }
@@ -476,6 +501,10 @@ This clustering suggests these entities share common themes, relationships, or c
         score = pattern['score']
 
         entity_name = await self._get_entity_name(central_node)
+
+        # Fallback to node ID if no entity name found
+        if not entity_name or entity_name == central_node:
+            entity_name = f"entity_{central_node}"
 
         centrality_descriptions = {
             'betweenness': 'acts as a critical bridge between different parts of the knowledge network',
@@ -519,6 +548,14 @@ This high centrality suggests that '{entity_name}' plays a pivotal role in conne
         target_name = await self._get_entity_name(target)
         path_names = await self._get_entity_names(path)
 
+        # Fallback to node IDs if no entity names found
+        if not source_name or source_name == source:
+            source_name = f"entity_{source}"
+        if not target_name or target_name == target:
+            target_name = f"entity_{target}"
+        if not path_names:
+            path_names = [f"entity_{node}" for node in path]
+
         insight_content = f"""Discovered an interesting connection pathway between '{source_name}' and '{target_name}'.
 
 Connection Path:
@@ -552,10 +589,26 @@ The existence of this path suggests that research or analysis involving '{source
         entities = pattern['entities']
         entity_names = await self._get_entity_names(entities)
 
+        # Fallback to entity IDs if no entity names found
+        if not entity_names:
+            entity_names = [f"entity_{entity}" for entity in entities if entity]
+
+        # Ensure we have at least one valid name
+        if not entity_names:
+            entity_names = [f"cluster_{pattern.get('pattern_id', 'unknown')}"]
+
+        # Ensure we have at least one name for the title and topic
+        primary_name = entity_names[0] if entity_names else f"semantic_cluster_{pattern.get('pattern_id', 'unknown')}"
+
+        # Clean entity names for display (filter out any remaining None/empty values)
+        display_names = [name for name in entity_names if name and isinstance(name, str) and name.strip()]
+        if not display_names:
+            display_names = [primary_name]
+
         insight_content = f"""Identified a semantic cluster of {len(entities)} entities that share conceptual similarity despite not being directly connected.
 
 Clustered Entities:
-{', '.join(entity_names)}
+{', '.join(display_names)}
 
 This semantic clustering suggests these entities:
 - Share underlying conceptual themes
@@ -567,9 +620,9 @@ The semantic similarity indicates potential for knowledge synthesis across these
 
         return {
             'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
-            'title': f"Semantic Cluster: {entity_names[0]} group",
+            'title': f"Semantic Cluster: {primary_name} group",
             'content': insight_content,
-            'topic': entity_names[0] if entity_names else 'semantic_cluster',
+            'topic': primary_name,
             'confidence': pattern['confidence'],
             'pattern_type': 'semantic_clustering',
             'evidence': await self._get_evidence_for_nodes(entities),
@@ -587,26 +640,60 @@ The semantic similarity indicates potential for knowledge synthesis across these
         query = """
         MATCH (e:Entity)
         WHERE e.id IN $entity_ids
-        RETURN e.name as name
+        RETURN e.name as name, e.id as id
         """
 
         names = []
         async with self.knowledge_graph.driver.session(
             database=self.knowledge_graph.database
         ) as session:
-            result = await session.run(query, {'entity_ids': entity_ids})
-            async for record in result:
-                names.append(record['name'])
+            try:
+                result = await session.run(query, {'entity_ids': entity_ids})
+                async for record in result:
+                    # Filter out None values and ensure we have valid strings
+                    name = record['name']
+                    if name is not None and isinstance(name, str) and name.strip():
+                        names.append(name.strip())
+                    else:
+                        # Fallback to entity ID if name is invalid
+                        entity_id = record['id']
+                        if entity_id and isinstance(entity_id, str):
+                            # Clean up entity ID to make it more readable
+                            readable_name = entity_id.replace('_', ' ').replace('-', ' ').title()
+                            names.append(readable_name)
+            except Exception as e:
+                logger.debug(f"Could not retrieve entity names: {e}")
+                # Fallback: return cleaned entity IDs
+                for entity_id in entity_ids:
+                    if entity_id and isinstance(entity_id, str):
+                        readable_name = entity_id.replace('_', ' ').replace('-', ' ').title()
+                        names.append(readable_name)
 
         return names
 
     async def _get_entity_name(self, entity_id: str) -> str:
         """Get entity name for a single entity ID."""
         names = await self._get_entity_names([entity_id])
-        return names[0] if names else entity_id
+        # Return the first valid name or fallback to a cleaned entity_id
+        if names:
+            return names[0]
+        # Fallback: clean up the entity_id to make it more readable
+        return entity_id.replace('_', ' ').replace('-', ' ').title() if entity_id else "Unknown Entity"
 
     async def _get_evidence_for_nodes(self, nodes: list[str]) -> list[dict]:
         """Get supporting evidence (facts) for a list of nodes."""
+        if not nodes:
+            return []
+
+        # First check if there are any Facts and MENTIONS relationships
+        check_query = """
+        MATCH (f:Fact)
+        OPTIONAL MATCH (f)-[r:MENTIONS]->(e:Entity)
+        WHERE e.id IN $node_ids
+        RETURN count(f) as fact_count, count(r) as mention_count
+        LIMIT 1
+        """
+
         query = """
         MATCH (f:Fact)-[:MENTIONS]->(e:Entity)
         WHERE e.id IN $node_ids
@@ -618,14 +705,48 @@ The semantic similarity indicates potential for knowledge synthesis across these
         async with self.knowledge_graph.driver.session(
             database=self.knowledge_graph.database
         ) as session:
-            result = await session.run(query, {'node_ids': nodes})
-            async for record in result:
-                evidence.append({
-                    'fact_id': record['fact_id'],
-                    'statement': record['statement'],
-                    'source': record['source'],
-                    'weight': 1.0
-                })
+            try:
+                # Check if we have facts and mentions relationships
+                check_result = await session.run(check_query, {'node_ids': nodes})
+                check_record = await check_result.single()
+
+                if check_record and check_record['mention_count'] > 0:
+                    # We have MENTIONS relationships, use the normal query
+                    result = await session.run(query, {'node_ids': nodes})
+                    async for record in result:
+                        evidence.append({
+                            'fact_id': record['fact_id'],
+                            'statement': record['statement'],
+                            'source': record['source'],
+                            'weight': 1.0
+                        })
+                else:
+                    # No MENTIONS relationships exist yet, try alternative evidence
+                    logger.debug("No MENTIONS relationships found, looking for alternative evidence")
+
+                    # Look for facts that might contain these node IDs in their content or metadata
+                    alt_query = """
+                    MATCH (f:Fact)
+                    WHERE any(node_id IN $node_ids WHERE f.content CONTAINS node_id OR f.entity_list CONTAINS node_id)
+                    RETURN f.id as fact_id, f.content as statement, f.source as source
+                    LIMIT 5
+                    """
+
+                    try:
+                        alt_result = await session.run(alt_query, {'node_ids': nodes})
+                        async for record in alt_result:
+                            evidence.append({
+                                'fact_id': record['fact_id'],
+                                'statement': record['statement'],
+                                'source': record['source'],
+                                'weight': 0.5  # Lower weight for indirect evidence
+                            })
+                    except Exception as e:
+                        logger.debug(f"Alternative evidence query failed: {e}")
+
+            except Exception as e:
+                logger.debug(f"Evidence retrieval failed: {e}")
+                # Return empty evidence rather than crashing
 
         return evidence
 
