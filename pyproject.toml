@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "synapse-mcp"
+dynamic = ["version"]
+description = "Autonomous Knowledge Synthesis and Inference Engine - MCP Server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+keywords = ["mcp", "ai", "knowledge", "synthesis", "zettelkasten", "montague", "graph"]
+authors = [
+  {name = "angrysky56", email = "angrysky56@github.com"},
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "mcp[cli]>=1.2.0",
+  "neo4j>=5.0.0",
+  "spacy>=3.7.0",
+  "nltk>=3.8.0",
+  "sentence-transformers>=2.2.0",
+  "scikit-learn>=1.3.0",
+  "networkx>=3.0.0",
+  "python-dotenv>=1.0.0",
+  "aiofiles>=23.0.0",
+  "asyncio-mqtt>=0.13.0",
+  "pydantic>=2.0.0",
+  "jinja2>=3.1.0",
+  "python-louvain>=0.16",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0.0",
+  "pytest-asyncio>=0.21.0",
+  "black>=23.0.0",
+  "ruff>=0.1.0",
+  "mypy>=1.0.0",
+]
+
+[project.urls]
+Documentation = "https://github.com/angrysky56/project-synapse-mcp#readme"
+Issues = "https://github.com/angrysky56/project-synapse-mcp/issues"
+Source = "https://github.com/angrysky56/project-synapse-mcp"
+
+[project.scripts]
+synapse-mcp = "synapse_mcp.server:main"
+
+[tool.hatch.version]
+path = "src/synapse_mcp/__about__.py"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]  # Line length handled by formatter
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
