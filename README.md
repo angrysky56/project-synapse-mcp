@@ -89,7 +89,7 @@ Add the following to your Claude Desktop configuration file (`~/Library/Applicat
       "command": "uv",
       "args": [
         "--directory",
-        "/home/ty/Repositories/ai_workspace/project-synapse-mcp",
+        "/path-to-your/project-synapse-mcp",
         "run",
         "python",
         "-m",
@@ -97,9 +97,10 @@ Add the following to your Claude Desktop configuration file (`~/Library/Applicat
       ],
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j", 
-        "NEO4J_PASSWORD": "synapse_password",
-        "ANTHROPIC_API_KEY": "your_api_key_here"
+        "NEO4J_USER": "neo4j",
+        "NEO4J_PASSWORD": "<your-neo4j-password>",
+        "NEO4J_DATABASE": "neo4j",
+        "LOG_LEVEL": "INFO"
       }
     }
   }
@@ -111,7 +112,7 @@ Add the following to your Claude Desktop configuration file (`~/Library/Applicat
 ### `ingest_text`
 Process and analyze text using the full semantic pipeline:
 ```
-Ingest raw text → Montague Grammar parsing → Entity extraction → 
+Ingest raw text → Montague Grammar parsing → Entity extraction →
 Knowledge graph storage → Automatic insight generation
 ```
 
@@ -194,7 +195,7 @@ Systematic validation of AI-generated insights against evidence and logical cons
 See `.env.example` for complete configuration options:
 
 - **Database**: Neo4j connection settings
-- **AI Models**: API keys for various providers  
+- **AI Models**: API keys for various providers
 - **Processing**: Batch sizes and thresholds
 - **Insight Generation**: Confidence levels and intervals
 
