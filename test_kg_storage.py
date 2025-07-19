@@ -6,6 +6,10 @@ Test knowledge graph storage directly to isolate the regex error.
 import asyncio
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
