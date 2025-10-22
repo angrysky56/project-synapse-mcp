@@ -6,11 +6,12 @@ formal semantic analysis and logical form generation for natural language.
 """
 
 import asyncio
-import re
-from typing import Dict, List, Optional, Tuple, Any
-import spacy
-from spacy import Language
 import logging
+import re
+from typing import Any
+
+import spacy
+from spacy.language import Language
 
 from ..utils.logging_config import get_logger
 
@@ -26,7 +27,7 @@ class MontagueParser:
     """
 
     def __init__(self):
-        self.nlp: Optional[Language] = None
+        self.nlp: Language | None = None
         self.entity_types = {
             'PERSON', 'ORG', 'GPE', 'LOC', 'PRODUCT',
             'EVENT', 'WORK_OF_ART', 'LAW', 'LANGUAGE'
@@ -51,7 +52,7 @@ class MontagueParser:
             logger.error(f"Failed to initialize Montague parser: {e}")
             raise
 
-    async def parse_text(self, text: str) -> Dict[str, Any]:
+    async def parse_text(self, text: str) -> dict[str, Any]:
         """
         Parse text using Montague Grammar principles.
 
@@ -84,7 +85,7 @@ class MontagueParser:
 
         return analysis
 
-    async def _extract_entities(self, doc) -> List[Dict]:
+    async def _extract_entities(self, doc) -> list[dict]:
         """Extract named entities with type and confidence information."""
         entities = []
 
@@ -104,7 +105,7 @@ class MontagueParser:
 
         return entities
 
-    async def _extract_relations(self, doc) -> List[Dict]:
+    async def _extract_relations(self, doc) -> list[dict]:
         """Extract semantic relations between entities."""
         relations = []
 
@@ -160,7 +161,7 @@ class MontagueParser:
 
         return " ∧ ".join(logical_forms) if logical_forms else ""
 
-    async def _extract_semantic_features(self, doc) -> Dict[str, Any]:
+    async def _extract_semantic_features(self, doc) -> dict[str, Any]:
         """Extract semantic features from the parsed document."""
         features = {
             'sentence_count': len(list(doc.sents)),
@@ -174,7 +175,7 @@ class MontagueParser:
 
         return features
 
-    async def _extract_propositions(self, doc) -> List[Dict]:
+    async def _extract_propositions(self, doc) -> list[dict]:
         """Extract atomic propositions that can be stored as facts."""
         propositions = []
 
@@ -237,14 +238,14 @@ class MontagueParser:
         normalized = re.sub(r'[^a-zA-Z0-9]', '_', text.lower())
         return f"{label.lower()}_{normalized}"
 
-    def _find_entity_for_token(self, doc, token) -> Optional[str]:
+    def _find_entity_for_token(self, doc, token) -> str | None:
         """Find if a token is part of a named entity."""
         for ent in doc.ents:
             if token.i >= ent.start and token.i < ent.end:
                 return ent.text
         return token.text
 
-    def _extract_svo_pattern(self, sent) -> Tuple[Optional[Any], Optional[Any], Optional[Any]]:
+    def _extract_svo_pattern(self, sent) -> tuple[Any | None, Any | None, Any | None]:
         """Extract Subject-Verb-Object pattern from a sentence."""
         subject = None
         verb = None
@@ -272,7 +273,7 @@ class MontagueParser:
                     return 'present'
         return 'unknown'
 
-    def _extract_modality(self, doc) -> List[str]:
+    def _extract_modality(self, doc) -> list[str]:
         """Extract modal verbs and expressions."""
         modals = []
         modal_verbs = {'can', 'could', 'may', 'might', 'must', 'shall', 'should', 'will', 'would'}

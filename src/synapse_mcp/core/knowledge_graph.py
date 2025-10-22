@@ -503,8 +503,6 @@ class KnowledgeGraph:
 
         if self.driver is None:
             raise RuntimeError("KnowledgeGraph driver is not initialized. Call connect() first.")
-        if self.driver is None:
-            raise RuntimeError("KnowledgeGraph driver is not initialized. Call connect() first.")
         async with self.driver.session(database=self.database) as session:
             result = await session.run(query, {'topic': topic})
 

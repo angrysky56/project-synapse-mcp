@@ -142,7 +142,7 @@ class InsightEngine:
         query = """
         MATCH (a)-[r]->(b)
         WHERE a.id IS NOT NULL AND b.id IS NOT NULL
-        RETURN a.id as source, b.id as target, type(r) as rel_type, r.confidence as confidence
+        RETURN a.id as source, b.id as target, type(r) as rel_type, coalesce(r.confidence, 1.0) as confidence
         """
 
         try:
