@@ -107,34 +107,40 @@ class KnowledgeGraph:
                     'new_edges': 0
                 }
 
-                # Store entities
+                # Store entities and track creation
                 if 'entities' in processed_data:
                     for entity in processed_data['entities']:
-                        await self._store_entity(tx, entity)
+                        was_created = await self._store_entity(tx, entity)
                         stats['entities_count'] += 1
+                        if was_created:
+                            stats['new_nodes'] += 1
 
-                # Store relationships
+                # Store relationships and track creation
                 if 'relationships' in processed_data:
                     for rel in processed_data['relationships']:
-                        await self._store_relationship(tx, rel)
+                        was_created = await self._store_relationship(tx, rel)
                         stats['relationships_count'] += 1
+                        if was_created:
+                            stats['new_edges'] += 1
 
-                # Store semantic facts
+                # Store semantic facts and track creation
                 if 'facts' in processed_data:
                     for fact in processed_data['facts']:
-                        await self._store_fact(tx, fact)
+                        was_created = await self._store_fact(tx, fact)
                         stats['facts_count'] += 1
+                        if was_created:
+                            stats['new_nodes'] += 1
 
                 await tx.commit()
-                logger.info(f"Stored {stats['entities_count']} entities, "
-                           f"{stats['relationships_count']} relationships, "
+                logger.info(f"Stored {stats['entities_count']} entities ({stats['new_nodes']} new nodes), "
+                           f"{stats['relationships_count']} relationships ({stats['new_edges']} new edges), "
                            f"{stats['facts_count']} facts")
                 return stats
             finally:
                 await tx.close()
 
-    async def _store_entity(self, tx, entity: dict) -> None:
-        """Store an entity node in the graph."""
+    async def _store_entity(self, tx, entity: dict) -> bool:
+        """Store an entity node in the graph. Returns True if created, False if already existed."""
         # Flatten properties to ensure all values are primitive types
         properties = entity.get('properties', {})
         flattened_props = {}
@@ -149,6 +155,11 @@ class KnowledgeGraph:
 
         query = """
         MERGE (e:Entity {id: $id})
+        ON CREATE SET
+            e.created_at = timestamp(),
+            e.was_created = true
+        ON MATCH SET
+            e.was_created = false
         SET e.name = $name,
             e.type = $type,
             e.confidence = $confidence,
@@ -156,11 +167,11 @@ class KnowledgeGraph:
             e.original_label = $original_label,
             e.start_char = $start_char,
             e.end_char = $end_char,
-            e.created_at = timestamp()
-        RETURN e
+            e.updated_at = timestamp()
+        RETURN e.was_created as created
         """
 
-        await tx.run(query, {
+        result = await tx.run(query, {
             'id': entity['id'],
             'name': entity['name'],
             'type': entity.get('type', 'Unknown'),
@@ -171,8 +182,11 @@ class KnowledgeGraph:
             'end_char': flattened_props.get('end_char', -1)
         })
 
-    async def _store_relationship(self, tx, relationship: dict) -> None:
-        """Store a relationship between entities."""
+        record = await result.single()
+        return record['created'] if record else False
+
+    async def _store_relationship(self, tx, relationship: dict) -> bool:
+        """Store a relationship between entities. Returns True if created, False if already existed."""
         # Flatten properties to ensure all values are primitive types
         properties = relationship.get('properties', {})
         flattened_props = {}
@@ -189,15 +203,20 @@ class KnowledgeGraph:
         MATCH (a:Entity {id: $source_id})
         MATCH (b:Entity {id: $target_id})
         MERGE (a)-[r:RELATES {type: $rel_type}]->(b)
+        ON CREATE SET
+            r.created_at = timestamp(),
+            r.was_created = true
+        ON MATCH SET
+            r.was_created = false
         SET r.confidence = $confidence,
             r.source = $source,
             r.predicate = $predicate,
             r.source_span = $source_span,
-            r.created_at = timestamp()
-        RETURN r
+            r.updated_at = timestamp()
+        RETURN r.was_created as created
         """
 
-        await tx.run(query, {
+        result = await tx.run(query, {
             'source_id': relationship['source_id'],
             'target_id': relationship['target_id'],
             'rel_type': relationship['type'],
@@ -207,8 +226,11 @@ class KnowledgeGraph:
             'source_span': flattened_props.get('source_span', '')
         })
 
-    async def _store_fact(self, tx, fact: dict) -> None:
-        """Store a semantic fact as a node with connections to entities."""
+        record = await result.single()
+        return record['created'] if record else False
+
+    async def _store_fact(self, tx, fact: dict) -> bool:
+        """Store a semantic fact as a node with connections to entities. Returns True if created."""
         # Completely flatten metadata to only simple key-value pairs
         flattened_metadata = {}
         metadata = fact.get('metadata', {})
@@ -228,24 +250,27 @@ class KnowledgeGraph:
                 flattened_metadata[key] = str(value)
 
         query = """
-        CREATE (f:Fact {
-            id: $id,
-            content: $content,
-            logical_form: $logical_form,
-            confidence: $confidence,
-            source: $source,
-            extraction_method: $extraction_method,
-            entity_list: $entity_list,
-            created_at: timestamp()
-        })
-        RETURN f
+        MERGE (f:Fact {id: $id})
+        ON CREATE SET
+            f.created_at = timestamp(),
+            f.was_created = true
+        ON MATCH SET
+            f.was_created = false
+        SET f.content = $content,
+            f.logical_form = $logical_form,
+            f.confidence = $confidence,
+            f.source = $source,
+            f.extraction_method = $extraction_method,
+            f.entity_list = $entity_list,
+            f.updated_at = timestamp()
+        RETURN f.was_created as created
         """
 
         # Extract specific metadata fields as separate properties
         extraction_method = flattened_metadata.get('extraction_method', 'unknown')
         entity_list = flattened_metadata.get('entities', '')
 
-        await tx.run(query, {
+        result = await tx.run(query, {
             'id': fact['id'],
             'content': fact['content'],
             'logical_form': fact.get('logical_form', ''),
@@ -254,6 +279,9 @@ class KnowledgeGraph:
             'extraction_method': extraction_method,
             'entity_list': entity_list
         })
+
+        record = await result.single()
+        was_created = record['created'] if record else False
 
         # Connect fact to related entities
         if 'entities' in fact:
@@ -267,6 +295,8 @@ class KnowledgeGraph:
                     'fact_id': fact['id'],
                     'entity_id': entity_id
                 })
+
+        return was_created
 
     async def query_semantic(self, query: str, max_results: int = 10) -> list[dict]:
         """
