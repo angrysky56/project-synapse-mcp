@@ -106,33 +106,117 @@ class MontagueParser:
         return entities
 
     async def _extract_relations(self, doc) -> list[dict]:
-        """Extract semantic relations between entities."""
+        """Extract semantic relations between entities and key noun phrases."""
         relations = []
 
-        # Simple dependency-based relation extraction
+        # Extract noun chunks for richer relationship detection
+        noun_chunks = {chunk.root.i: chunk.text for chunk in doc.noun_chunks}
+
+        # Strategy 1: Subject-Verb-Object patterns
         for token in doc:
-            if token.dep_ in ['nsubj', 'dobj', 'pobj']:
-                # Find subject-verb-object patterns
+            if token.dep_ in ['nsubj', 'nsubjpass']:
                 head = token.head
 
-                # Look for related entities
+                # Get subject (prefer entity, fall back to noun chunk)
                 subject = self._find_entity_for_token(doc, token)
+                if not subject and token.i in noun_chunks:
+                    subject = noun_chunks[token.i]
+
+                if not subject:
+                    continue
+
+                # Get predicate
                 predicate = head.lemma_ if head.pos_ == 'VERB' else head.text
 
-                # Find object if it exists
+                # Find object
                 obj = None
                 for child in head.children:
-                    if child.dep_ in ['dobj', 'pobj'] and child != token:
+                    if child.dep_ in ['dobj', 'attr', 'pobj']:
                         obj = self._find_entity_for_token(doc, child)
-                        break
+                        if not obj and child.i in noun_chunks:
+                            obj = noun_chunks[child.i]
+                        if obj:
+                            break
 
                 if subject and obj:
                     relations.append({
                         'subject': subject,
                         'predicate': predicate,
                         'object': obj,
-                        'confidence': 0.8,  # Default confidence
+                        'confidence': 0.8,
                         'source_span': f"{token.i}-{head.i}"
+                    })
+
+        # Strategy 2: Copula/Linking verb patterns (is, are, becomes, equals)
+        for token in doc:
+            if token.lemma_ in ['be', 'become', 'equal', 'represent', 'constitute']:
+                # Find subject
+                subject = None
+                for child in token.children:
+                    if child.dep_ in ['nsubj', 'nsubjpass']:
+                        subject = self._find_entity_for_token(doc, child)
+                        if not subject and child.i in noun_chunks:
+                            subject = noun_chunks[child.i]
+                        break
+
+                # Find complement/attribute
+                obj = None
+                for child in token.children:
+                    if child.dep_ in ['attr', 'acomp', 'dobj']:
+                        obj = self._find_entity_for_token(doc, child)
+                        if not obj and child.i in noun_chunks:
+                            obj = noun_chunks[child.i]
+                        break
+
+                if subject and obj:
+                    relations.append({
+                        'subject': subject,
+                        'predicate': f"is-{token.lemma_}",
+                        'object': obj,
+                        'confidence': 0.75,
+                        'source_span': f"{token.i}"
+                    })
+
+        # Strategy 3: Prepositional relationships
+        for token in doc:
+            if token.dep_ == 'prep' and token.head.pos_ in ['NOUN', 'PROPN', 'VERB']:
+                # Get the noun being modified
+                subject = self._find_entity_for_token(doc, token.head)
+                if not subject and token.head.i in noun_chunks:
+                    subject = noun_chunks[token.head.i]
+
+                # Get the object of the preposition
+                obj = None
+                for child in token.children:
+                    if child.dep_ == 'pobj':
+                        obj = self._find_entity_for_token(doc, child)
+                        if not obj and child.i in noun_chunks:
+                            obj = noun_chunks[child.i]
+                        break
+
+                if subject and obj:
+                    relations.append({
+                        'subject': subject,
+                        'predicate': f"relates-via-{token.text}",
+                        'object': obj,
+                        'confidence': 0.7,
+                        'source_span': f"{token.head.i}-{token.i}"
+                    })
+
+        # Strategy 4: Compound and possessive patterns
+        for token in doc:
+            if token.dep_ in ['compound', 'poss'] and token.head.pos_ in ['NOUN', 'PROPN']:
+                subject = token.text
+                obj = token.head.text
+
+                if len(subject) > 2 and len(obj) > 2:  # Filter very short words
+                    relation_type = 'modifies' if token.dep_ == 'compound' else 'possesses'
+                    relations.append({
+                        'subject': subject,
+                        'predicate': relation_type,
+                        'object': obj,
+                        'confidence': 0.65,
+                        'source_span': f"{token.i}-{token.head.i}"
                     })
 
         return relations
