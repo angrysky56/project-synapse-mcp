@@ -233,6 +233,12 @@ class WikiAdapter:
         pages = await self.list_pages("wiki")
         page_names = {pg["name"] for pg in pages}
 
+        # Build normalized lookup: lowercase, spaces↔hyphens, stripped
+        def _normalize(name: str) -> str:
+            return name.lower().replace(" ", "-").replace("_", "-").strip()
+
+        normalized_lookup: set[str] = {_normalize(n) for n in page_names}
+
         # Collect all outbound wikilinks and inbound counts
         link_re = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
         inbound: dict[str, int] = {name: 0 for name in page_names}
@@ -247,9 +253,15 @@ class WikiAdapter:
                 missing_frontmatter.append(pg["path"])
             for match in link_re.finditer(body):
                 target = match.group(1).strip()
-                if target in inbound:
-                    inbound[target] += 1
-                else:
+                norm_target = _normalize(target)
+                # Check if any page matches (case-insensitive, hyphen/space agnostic)
+                matched = False
+                for pname in page_names:
+                    if _normalize(pname) == norm_target:
+                        inbound[pname] += 1
+                        matched = True
+                        break
+                if not matched and norm_target not in normalized_lookup:
                     broken_links.append({"source": pg["path"], "target": target})
 
         orphans = [name for name, count in inbound.items()
