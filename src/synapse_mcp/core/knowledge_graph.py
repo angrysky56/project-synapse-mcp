@@ -570,3 +570,18 @@ class KnowledgeGraph:
                collect({fact_id: f.id, statement: f.content, source: f.source}) as evidence
         ORDER BY score DESC
         """
+
+        async with self.driver.session(database=self.database) as session:
+            result = await session.run(query, {'vec': topic_embedding, 'limit': 20})
+            insights: list[dict] = []
+            async for record in result:
+                insights.append({
+                    'zettel_id': record['zettel_id'],
+                    'title': record['title'],
+                    'content': record['content'],
+                    'confidence': record['confidence'],
+                    'pattern_type': record['pattern_type'],
+                    'created_at': record['created_at'],
+                    'evidence': [e for e in record['evidence'] if e['fact_id']],
+                })
+            return insights
