@@ -108,7 +108,7 @@ synapse_server = SynapseServer()
 
 
 @asynccontextmanager
-async def lifespan_context(_: FastMCP) -> AsyncIterator[dict[str, Any]]:
+async def lifespan_context(mcp_app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server lifecycle with proper cleanup."""
     logger.info("Starting Project Synapse MCP server")
 
@@ -140,7 +140,7 @@ mcp = FastMCP(name="project-synapse", lifespan=lifespan_context)
 
 
 @mcp.tool()
-async def debug_test(_: Context) -> str:
+async def debug_test() -> str:
     """Simple test tool to check if MCP server is working."""
     try:
         logger.info("Debug test tool called")
@@ -937,7 +937,7 @@ def cleanup_processes() -> None:
         logger.error("Error during cleanup: %s", e)
 
 
-def signal_handler(signum: int, _: Any) -> None:
+def signal_handler(signum: int, frame: Any) -> None:
     """Handle shutdown signals gracefully."""
     logger.info("Received signal %s, shutting down gracefully", signum)
     cleanup_processes()
