@@ -15,10 +15,9 @@
         "NEO4J_USER": "neo4j",
         "NEO4J_PASSWORD": "synapse_password",
         "NEO4J_DATABASE": "synapse",
-        "ANTHROPIC_API_KEY": "your_anthropic_key_here",
         "LOG_LEVEL": "INFO",
-        "INSIGHT_CONFIDENCE_THRESHOLD": "0.8",
-        "PATTERN_DETECTION_INTERVAL": "300"
+        "WIKI_VAULT_PATH": "/home/ty/Documents/LLM-WIKI",
+        "WIKI_GITHUB_REPO": "https://github.com/angrysky56/LLM-WIKI"
       }
     }
   }

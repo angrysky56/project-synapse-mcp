@@ -4,6 +4,20 @@
 
 Project Synapse is an MCP (Model Context Protocol) server that combines a Neo4j 2026.x graph database with an Obsidian Markdown wiki to create a persistent, compounding knowledge base. Raw text is processed through a semantic pipeline into interconnected graph nodes with vector embeddings, while a human-readable wiki layer provides browsable, interlinked Markdown pages.
 
+## What This Is (and Isn't)
+
+**This is a knowledge system, not a code editor.** It's for the thinking, research, and writing that surrounds projects — architecture decisions, domain research, design rationale, reference material, meeting notes.
+
+Code lives in its repo. Knowledge *about* the code lives here.
+
+**Use cases:**
+- Research deep-dives that accumulate over weeks/months
+- Project knowledge bases (why decisions were made, not just what)
+- Personal knowledge management (articles, books, podcast notes)
+- Collaborative brainstorming with AI as the wiki maintainer
+
+**Per-project setup:** Create a separate Obsidian vault + GitHub repo for each project. Point the `WIKI_VAULT_PATH` env var at it. One Neo4j instance can serve multiple projects (graphs coexist).
+
 ## Architecture
 
 ```
@@ -54,9 +68,26 @@ Raw Sources (Obsidian vault / Clippings)
 
 ### Prerequisites
 - Python 3.12+
-- Neo4j 2026.x
-- uv package manager
-- Obsidian (for wiki browsing)
+- [Neo4j 2026.x](https://neo4j.com/deployment-center/) (Community or Enterprise)
+- uv package manager (`pip install uv`)
+- [Obsidian](https://obsidian.md/) with the [Git community plugin](https://publish.obsidian.md/git-doc/Getting+Started)
+- A GitHub repo for the wiki vault (can be private)
+
+### Neo4j Setup
+```bash
+# Ubuntu/Debian — see neo4j.com for other platforms
+sudo apt install neo4j
+sudo systemctl start neo4j
+sudo systemctl enable neo4j
+# Set password (default user: neo4j)
+sudo neo4j-admin set-initial-password your_password
+```
+
+### Obsidian Vault Setup
+1. Create a new vault in Obsidian (or clone your wiki repo)
+2. Install the **Git** community plugin (Settings → Community Plugins → Browse → "Git")
+3. Configure Git plugin with your GitHub credentials
+4. The vault structure (`raw/`, `wiki/`, `CLAUDE.md`) is created automatically by Synapse on first run
 
 ### Installation
 
