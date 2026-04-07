@@ -7,12 +7,20 @@ and generates novel insights from the knowledge graph.
 
 import asyncio
 import os
+import random
 import uuid
 from datetime import datetime
+from typing import Any
 
 import networkx as nx
+from sklearn.cluster import AgglomerativeClustering
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+try:
+    import community as community_louvain
+except ImportError:
+    community_louvain = None
 
 from ..utils.logging_config import get_logger
 
@@ -20,7 +28,14 @@ logger = get_logger(__name__)
 
 
 class InsightEngine:
-    async def get_insights_by_topic(self, topic: str, max_results: int = 20) -> list[dict]:
+    """
+    Zettelkasten-inspired engine for autonomous insight generation.
+
+    Implements pattern detection and knowledge synthesis using graph algorithms
+    and machine learning to identify non-obvious connections and generate insights.
+    """
+
+    async def get_insights_by_topic(self, topic: str, max_results: int = 20) -> list[dict[str, Any]]:
         """
         Retrieve all insights related to a specific topic.
 
@@ -33,7 +48,9 @@ class InsightEngine:
         """
         query = """
         MATCH (z:Zettel)
-        WHERE toLower(z.topic) CONTAINS $topic OR toLower(z.title) CONTAINS $topic OR toLower(z.content) CONTAINS $topic
+        WHERE toLower(z.topic) CONTAINS $topic
+           OR toLower(z.title) CONTAINS $topic
+           OR toLower(z.content) CONTAINS $topic
         OPTIONAL MATCH (z)-[:SUPPORTED_BY]->(f:Fact)
         RETURN z.id as zettel_id, z.title as title, z.content as content,
                z.confidence as confidence, z.pattern_type as pattern_type,
@@ -64,14 +81,8 @@ class InsightEngine:
                 })
 
         return insights
-    """
-    Zettelkasten-inspired engine for autonomous insight generation.
 
-    Implements pattern detection and knowledge synthesis using graph algorithms
-    and machine learning to identify non-obvious connections and generate insights.
-    """
-
-    def __init__(self, knowledge_graph, montague_parser):
+    def __init__(self, knowledge_graph: Any, montague_parser: Any) -> None:
         self.knowledge_graph = knowledge_graph
         self.montague_parser = montague_parser
         self.graph = nx.DiGraph()
@@ -89,7 +100,7 @@ class InsightEngine:
             await self._build_analysis_graph()
             logger.info("Insight engine initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize insight engine: {e}")
+            logger.error("Failed to initialize insight engine: %s", e)
             raise
 
     async def cleanup(self) -> None:
@@ -109,8 +120,8 @@ class InsightEngine:
             except asyncio.CancelledError:
                 logger.info("Autonomous processing cancelled")
                 break
-            except Exception as e:
-                logger.error(f"Error in autonomous processing: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Error in autonomous processing: %s", e)
                 await asyncio.sleep(60)  # Wait before retrying
 
     async def _autonomous_processing_cycle(self) -> None:
@@ -121,7 +132,7 @@ class InsightEngine:
         await self._build_analysis_graph()
 
         # Detect patterns using various algorithms
-        patterns = await self._detect_patterns()
+        patterns: list[dict[str, Any]] = await self._detect_patterns()
 
         # Generate insights from detected patterns
         for pattern in patterns:
@@ -130,9 +141,9 @@ class InsightEngine:
                 if insight and insight['confidence'] >= self.confidence_threshold:
                     # Store insight in knowledge graph
                     zettel_id = await self.knowledge_graph.store_insight(insight)
-                    logger.info(f"Generated new insight with Zettel ID: {zettel_id}")
-            except Exception as e:
-                logger.error(f"Failed to generate insight from pattern: {e}")
+                    logger.info("Generated new insight with Zettel ID: %s", zettel_id)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to generate insight from pattern: %s", e)
 
     async def _build_analysis_graph(self) -> None:
         """Build NetworkX graph from knowledge graph for analysis."""
@@ -142,7 +153,8 @@ class InsightEngine:
         query = """
         MATCH (a)-[r]->(b)
         WHERE a.id IS NOT NULL AND b.id IS NOT NULL
-        RETURN a.id as source, b.id as target, type(r) as rel_type, coalesce(r.confidence, 1.0) as confidence
+        RETURN a.id as source, b.id as target, type(r) as rel_type,
+               coalesce(r.confidence, 1.0) as confidence
         """
 
         try:
@@ -166,16 +178,19 @@ class InsightEngine:
                         )
                         edge_count += 1
 
-            logger.debug(f"Built analysis graph with {self.graph.number_of_nodes()} nodes, "
-                        f"{self.graph.number_of_edges()} edges")
+            logger.debug(
+                "Built analysis graph with %d nodes, %d edges",
+                self.graph.number_of_nodes(),
+                self.graph.number_of_edges()
+            )
 
-        except Exception as e:
-            logger.warning(f"Could not build analysis graph from knowledge base: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Could not build analysis graph from knowledge base: %s", e)
             logger.debug("Starting with empty analysis graph")
 
-    async def _detect_patterns(self) -> list[dict]:
+    async def _detect_patterns(self) -> list[dict[str, Any]]:
         """Detect patterns in the knowledge graph using various algorithms."""
-        patterns = []
+        patterns: list[dict[str, Any]] = []
 
         if self.graph.number_of_nodes() < 2:
             logger.debug("Graph too small for pattern detection, skipping")
@@ -185,34 +200,34 @@ class InsightEngine:
         try:
             communities = await self._detect_communities()
             patterns.extend(communities)
-        except Exception as e:
-            logger.debug(f"Community detection failed: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.debug("Community detection failed: %s", e)
 
         # Centrality analysis
         try:
             central_nodes = await self._analyze_centrality()
             patterns.extend(central_nodes)
-        except Exception as e:
-            logger.debug(f"Centrality analysis failed: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.debug("Centrality analysis failed: %s", e)
 
         # Path analysis
         try:
             interesting_paths = await self._find_interesting_paths()
             patterns.extend(interesting_paths)
-        except Exception as e:
-            logger.debug(f"Path analysis failed: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.debug("Path analysis failed: %s", e)
 
         # Clustering by semantic similarity
         try:
             semantic_clusters = await self._cluster_by_semantics()
             patterns.extend(semantic_clusters)
-        except Exception as e:
-            logger.debug(f"Semantic clustering failed: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.debug("Semantic clustering failed: %s", e)
 
-        logger.debug(f"Detected {len(patterns)} patterns")
+        logger.debug("Detected %d patterns", len(patterns))
         return patterns
 
-    async def _detect_communities(self) -> list[dict]:
+    async def _detect_communities(self) -> list[dict[str, Any]]:
         """Detect communities/clusters in the graph."""
         try:
             # Convert to undirected for community detection
@@ -221,19 +236,19 @@ class InsightEngine:
             if undirected.number_of_nodes() < 3:
                 return []
 
+            patterns: list[dict[str, Any]] = []
+
             # Use Louvain algorithm for community detection
-            try:
-                import community as community_louvain
+            if community_louvain:
                 partition = community_louvain.best_partition(undirected)
 
                 # Group nodes by community
-                communities = {}
+                communities: dict[int, list[str]] = {}
                 for node, comm_id in partition.items():
                     if comm_id not in communities:
                         communities[comm_id] = []
                     communities[comm_id].append(node)
 
-                patterns = []
                 for comm_id, nodes in communities.items():
                     if len(nodes) >= 3:  # Only consider meaningful communities
                         patterns.append({
@@ -245,12 +260,10 @@ class InsightEngine:
                         })
 
                 return patterns
-
-            except ImportError:
+            else:
                 logger.debug("python-louvain not available, using simple clustering")
                 # Fallback to simple connected components
                 components = list(nx.connected_components(undirected))
-                patterns = []
 
                 for i, component in enumerate(components):
                     if len(component) >= 3:
@@ -264,35 +277,35 @@ class InsightEngine:
 
                 return patterns
 
-        except Exception as e:
-            logger.debug(f"Community detection failed: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.debug("Community detection failed: %s", e)
             return []
 
-    async def _analyze_centrality(self) -> list[dict]:
+    async def _analyze_centrality(self) -> list[dict[str, Any]]:
         """Analyze node centrality to find important entities."""
-        patterns = []
+        patterns: list[dict[str, Any]] = []
 
         try:
             if self.graph.number_of_nodes() < 2:
                 return patterns
 
             # Calculate different centrality measures
-            centralities = {}
+            centralities: dict[str, dict[Any, float]] = {}
 
             try:
                 centralities['betweenness'] = nx.betweenness_centrality(self.graph)
-            except Exception as e:
-                logger.debug(f"Betweenness centrality failed: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.debug("Betweenness centrality failed: %s", e)
 
             try:
                 centralities['pagerank'] = nx.pagerank(self.graph)
-            except Exception as e:
-                logger.debug(f"PageRank centrality failed: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.debug("PageRank centrality failed: %s", e)
 
             try:
                 centralities['eigenvector'] = nx.eigenvector_centrality_numpy(self.graph)
-            except Exception as e:
-                logger.debug(f"Eigenvector centrality failed: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.debug("Eigenvector centrality failed: %s", e)
 
             for measure_name, centrality_dict in centralities.items():
                 # Find top nodes for each centrality measure
@@ -315,17 +328,20 @@ class InsightEngine:
             logger.debug(f"Centrality analysis failed: {e}")
             return []
 
-    async def _find_interesting_paths(self) -> list[dict]:
+    async def _find_interesting_paths(self) -> list[dict[str, Any]]:
         """Find interesting paths between entities."""
-        patterns = []
+        patterns: list[dict[str, Any]] = []
 
         try:
             nodes = list(self.graph.nodes())
 
             # Sample pairs of nodes to avoid exponential complexity
-            import random
             if len(nodes) > 20:
-                sample_pairs = random.sample([(a, b) for a in nodes for b in nodes if a != b], 50)
+                # Use SystemRandom for security linting compliance if needed
+                secure_random = random.SystemRandom()
+                sample_pairs = secure_random.sample(
+                    [(a, b) for a in nodes for b in nodes if a != b], 50
+                )
             else:
                 sample_pairs = [(a, b) for a in nodes for b in nodes if a != b]
 
@@ -344,7 +360,7 @@ class InsightEngine:
                                 'length': len(path),
                                 'source': source,
                                 'target': target,
-                                'confidence': 1.0 / len(path)  # Shorter paths higher confidence
+                                'confidence': 1.0 / len(path)  # Shorter paths = higher confidence
                             })
                 except nx.NetworkXNoPath:
                     continue
@@ -355,9 +371,9 @@ class InsightEngine:
             logger.error(f"Path analysis failed: {e}")
             return []
 
-    async def _cluster_by_semantics(self) -> list[dict]:
+    async def _cluster_by_semantics(self) -> list[dict[str, Any]]:
         """Cluster entities based on semantic similarity."""
-        patterns = []
+        patterns: list[dict[str, Any]] = []
 
         try:
             # Get entity descriptions from knowledge graph
@@ -381,12 +397,21 @@ class InsightEngine:
                     description = record['description']
 
                     # Only add entities with valid descriptions
-                    if entity_id and description and isinstance(description, str) and description.strip():
+                    is_valid = (
+                        entity_id
+                        and description
+                        and isinstance(description, str)
+                        and description.strip()
+                    )
+                    if is_valid:
                         entities.append(entity_id)
                         descriptions.append(description.strip())
 
             if len(descriptions) < 3:
-                logger.debug(f"Not enough entities with descriptions for clustering: {len(descriptions)}")
+                logger.debug(
+                    "Not enough entities with descriptions for clustering: %d",
+                    len(descriptions)
+                )
                 return patterns
 
             # Calculate TF-IDF vectors
@@ -396,7 +421,6 @@ class InsightEngine:
             similarity_matrix = cosine_similarity(tfidf_matrix)
 
             # Find clusters of similar entities
-            from sklearn.cluster import AgglomerativeClustering
             n_clusters = min(5, len(entities) // 3)
 
             if n_clusters >= 2:
@@ -404,14 +428,15 @@ class InsightEngine:
                 cluster_labels = clustering.fit_predict(similarity_matrix)
 
                 # Group entities by cluster
-                clusters = {}
+                clusters: dict[int, list[str]] = {}
                 for i, label in enumerate(cluster_labels):
                     if label not in clusters:
                         clusters[label] = []
                     clusters[label].append(entities[i])
 
                 for cluster_id, cluster_entities in clusters.items():
-                    if len(cluster_entities) >= 2 and cluster_entities:  # Ensure we have valid entities
+                    # Ensure we have valid entities
+                    if len(cluster_entities) >= 2 and cluster_entities:
                         # Filter out any None values from cluster_entities
                         valid_entities = [e for e in cluster_entities if e is not None]
                         if valid_entities:
@@ -429,7 +454,7 @@ class InsightEngine:
             logger.error(f"Semantic clustering failed: {e}")
             return []
 
-    async def _generate_insight_from_pattern(self, pattern: dict) -> dict | None:
+    async def _generate_insight_from_pattern(self, pattern: dict[str, Any]) -> dict[str, Any] | None:
         """Generate an insight from a detected pattern."""
         try:
             pattern_type = pattern['type']
@@ -445,11 +470,15 @@ class InsightEngine:
 
             return None
 
-        except Exception as e:
-            logger.error(f"Failed to generate insight from pattern {pattern.get('pattern_id')}: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "Failed to generate insight from pattern %s: %s",
+                pattern.get('pattern_id'),
+                e
+            )
             return None
 
-    async def _generate_community_insight(self, pattern: dict) -> dict:
+    async def _generate_community_insight(self, pattern: dict[str, Any]) -> dict[str, Any]:
         """Generate insight from a community pattern."""
         nodes = pattern['nodes']
 
@@ -465,19 +494,31 @@ class InsightEngine:
             entity_names = [f"community_{pattern.get('pattern_id', 'unknown')}"]
 
         # Ensure we have at least one name for the title
-        primary_name = entity_names[0] if entity_names else f"community_{pattern.get('pattern_id', 'unknown')}"
+        primary_name = (
+            entity_names[0]
+            if entity_names
+            else f"community_{pattern.get('pattern_id', 'unknown')}"
+        )
 
         # Clean entity names for display (filter out any remaining None/empty values)
-        display_names = [name for name in entity_names if name and isinstance(name, str) and name.strip()]
+        display_names = [
+            name
+            for name in entity_names
+            if name and isinstance(name, str) and name.strip()
+        ]
         if not display_names:
             display_names = [primary_name]
 
-        insight_content = f"""Discovered a cluster of {len(nodes)} interconnected entities that form a coherent knowledge community.
-
-Key entities in this cluster:
-{', '.join(display_names[:5])}{'...' if len(display_names) > 5 else ''}
-
-This clustering suggests these entities share common themes, relationships, or contextual significance that may not be immediately obvious from individual examination. The strength of their interconnections indicates they should be considered together when analyzing related topics."""
+        insight_content = (
+            f"Discovered a cluster of {len(nodes)} interconnected entities that "
+            f"form a coherent knowledge community.\n\n"
+            f"Key entities in this cluster:\n"
+            f"{', '.join(display_names[:5])}{'...' if len(display_names) > 5 else ''}\n\n"
+            f"This clustering suggests these entities share common themes, relationships, "
+            f"or contextual significance that may not be immediately obvious from individual "
+            f"examination. The strength of their interconnections indicates they should be "
+            f"considered together when analyzing related topics."
+        )
 
         return {
             'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
@@ -494,7 +535,7 @@ This clustering suggests these entities share common themes, relationships, or c
             }
         }
 
-    async def _generate_centrality_insight(self, pattern: dict) -> dict:
+    async def _generate_centrality_insight(self, pattern: dict[str, Any]) -> dict[str, Any]:
         """Generate insight from a centrality pattern."""
         central_node = pattern['central_node']
         centrality_type = pattern['centrality_type']
@@ -507,21 +548,25 @@ This clustering suggests these entities share common themes, relationships, or c
             entity_name = f"entity_{central_node}"
 
         centrality_descriptions = {
-            'betweenness': 'acts as a critical bridge between different parts of the knowledge network',
+            'betweenness': 'acts as a critical bridge between different parts of the knowledge '
+                           'network',
             'pagerank': 'has high importance based on the network of relationships pointing to it',
             'eigenvector': 'is connected to other highly important entities in the network'
         }
 
         description = centrality_descriptions.get(centrality_type, 'shows high centrality')
 
-        insight_content = f"""The entity '{entity_name}' demonstrates exceptional structural importance in the knowledge network.
-
-Centrality Analysis:
-- Measure: {centrality_type.title()} centrality
-- Score: {score:.3f}
-- Interpretation: This entity {description}
-
-This high centrality suggests that '{entity_name}' plays a pivotal role in connecting different domains of knowledge and may be a key concept for understanding broader relationships within the knowledge base."""
+        insight_content = (
+            f"The entity '{entity_name}' demonstrates exceptional structural importance in the "
+            f"knowledge network.\n\n"
+            f"Centrality Analysis:\n"
+            f"- Measure: {centrality_type.title()} centrality\n"
+            f"- Score: {score:.3f}\n"
+            f"- Interpretation: This entity {description}\n\n"
+            f"This high centrality suggests that '{entity_name}' plays a pivotal role in "
+            f"connecting different domains of knowledge and may be a key concept for "
+            f"understanding broader relationships within the knowledge base."
+        )
 
         return {
             'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
@@ -538,7 +583,7 @@ This high centrality suggests that '{entity_name}' plays a pivotal role in conne
             }
         }
 
-    async def _generate_path_insight(self, pattern: dict) -> dict:
+    async def _generate_path_insight(self, pattern: dict[str, Any]) -> dict[str, Any]:
         """Generate insight from an interesting path pattern."""
         path = pattern['path']
         source = pattern['source']
@@ -556,17 +601,21 @@ This high centrality suggests that '{entity_name}' plays a pivotal role in conne
         if not path_names:
             path_names = [f"entity_{node}" for node in path]
 
-        insight_content = f"""Discovered an interesting connection pathway between '{source_name}' and '{target_name}'.
-
-Connection Path:
-{' → '.join(path_names)}
-
-This path reveals a non-obvious relationship that connects these seemingly distant entities through {len(path) - 2} intermediate concept(s). Such paths often indicate:
-- Hidden semantic relationships
-- Potential areas for knowledge synthesis
-- Opportunities for interdisciplinary insights
-
-The existence of this path suggests that research or analysis involving '{source_name}' might benefit from considering connections to '{target_name}' and vice versa."""
+        insight_content = (
+            f"Discovered an interesting connection pathway between '{source_name}' and "
+            f"'{target_name}'.\n\n"
+            f"Connection Path:\n"
+            f"{' → '.join(path_names)}\n\n"
+            f"This path reveals a non-obvious relationship that connects these seemingly "
+            f"distant entities through {len(path) - 2} intermediate concept(s). Such "
+            f"paths often indicate:\n"
+            f"- Hidden semantic relationships\n"
+            f"- Potential areas for knowledge synthesis\n"
+            f"- Opportunities for interdisciplinary insights\n\n"
+            f"The existence of this path suggests that research or analysis involving "
+            f"'{source_name}' might benefit from considering connections to '{target_name}' "
+            f"and vice versa."
+        )
 
         return {
             'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
@@ -584,7 +633,7 @@ The existence of this path suggests that research or analysis involving '{source
             }
         }
 
-    async def _generate_semantic_insight(self, pattern: dict) -> dict:
+    async def _generate_semantic_insight(self, pattern: dict[str, Any]) -> dict[str, Any]:
         """Generate insight from semantic clustering."""
         entities = pattern['entities']
         entity_names = await self._get_entity_names(entities)
@@ -598,25 +647,31 @@ The existence of this path suggests that research or analysis involving '{source
             entity_names = [f"cluster_{pattern.get('pattern_id', 'unknown')}"]
 
         # Ensure we have at least one name for the title and topic
-        primary_name = entity_names[0] if entity_names else f"semantic_cluster_{pattern.get('pattern_id', 'unknown')}"
+        default_name = f"semantic_cluster_{pattern.get('pattern_id', 'unknown')}"
+        primary_name = entity_names[0] if entity_names else default_name
 
         # Clean entity names for display (filter out any remaining None/empty values)
-        display_names = [name for name in entity_names if name and isinstance(name, str) and name.strip()]
+        display_names = [
+            name
+            for name in entity_names
+            if name and isinstance(name, str) and name.strip()
+        ]
         if not display_names:
             display_names = [primary_name]
 
-        insight_content = f"""Identified a semantic cluster of {len(entities)} entities that share conceptual similarity despite not being directly connected.
-
-Clustered Entities:
-{', '.join(display_names)}
-
-This semantic clustering suggests these entities:
-- Share underlying conceptual themes
-- May benefit from being analyzed together
-- Could reveal hidden patterns when considered as a group
-- Represent different aspects of a common domain
-
-The semantic similarity indicates potential for knowledge synthesis across these entities, even in the absence of explicit relationships."""
+        insight_content = (
+            f"Identified a semantic cluster of {len(entities)} entities that "
+            f"share conceptual similarity despite not being directly connected.\n\n"
+            f"Clustered Entities:\n"
+            f"{', '.join(display_names)}\n\n"
+            f"This semantic clustering suggests these entities:\n"
+            f"- Share underlying conceptual themes\n"
+            f"- May benefit from being analyzed together\n"
+            f"- Could reveal hidden patterns when considered as a group\n"
+            f"- Represent different aspects of a common domain\n\n"
+            f"The semantic similarity indicates potential for knowledge synthesis across "
+            f"these entities, even in the absence of explicit relationships."
+        )
 
         return {
             'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
@@ -661,8 +716,8 @@ The semantic similarity indicates potential for knowledge synthesis across these
                             # Clean up entity ID to make it more readable
                             readable_name = entity_id.replace('_', ' ').replace('-', ' ').title()
                             names.append(readable_name)
-            except Exception as e:
-                logger.debug(f"Could not retrieve entity names: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.debug("Could not retrieve entity names: %s", e)
                 # Fallback: return cleaned entity IDs
                 for entity_id in entity_ids:
                     if entity_id and isinstance(entity_id, str):
@@ -678,9 +733,11 @@ The semantic similarity indicates potential for knowledge synthesis across these
         if names:
             return names[0]
         # Fallback: clean up the entity_id to make it more readable
-        return entity_id.replace('_', ' ').replace('-', ' ').title() if entity_id else "Unknown Entity"
+        if entity_id:
+            return entity_id.replace('_', ' ').replace('-', ' ').title()
+        return "Unknown Entity"
 
-    async def _get_evidence_for_nodes(self, nodes: list[str]) -> list[dict]:
+    async def _get_evidence_for_nodes(self, nodes: list[str]) -> list[dict[str, Any]]:
         """Get supporting evidence (facts) for a list of nodes."""
         if not nodes:
             return []
@@ -701,7 +758,7 @@ The semantic similarity indicates potential for knowledge synthesis across these
         LIMIT 10
         """
 
-        evidence = []
+        evidence: list[dict[str, Any]] = []
         async with self.knowledge_graph.driver.session(
             database=self.knowledge_graph.database
         ) as session:
@@ -722,12 +779,14 @@ The semantic similarity indicates potential for knowledge synthesis across these
                         })
                 else:
                     # No MENTIONS relationships exist yet, try alternative evidence
-                    logger.debug("No MENTIONS relationships found, looking for alternative evidence")
+                    logger.debug("No MENTIONS relationships found, using alternatives")
 
-                    # Look for facts that might contain these node IDs in their content or metadata
+                    # Look for facts that might contain these node IDs
                     alt_query = """
                     MATCH (f:Fact)
-                    WHERE any(node_id IN $node_ids WHERE f.content CONTAINS node_id OR f.entity_list CONTAINS node_id)
+                    WHERE any(node_id IN $node_ids
+                          WHERE f.content CONTAINS node_id
+                             OR f.entity_list CONTAINS node_id)
                     RETURN f.id as fact_id, f.content as statement, f.source as source
                     LIMIT 5
                     """
@@ -741,11 +800,11 @@ The semantic similarity indicates potential for knowledge synthesis across these
                                 'source': record['source'],
                                 'weight': 0.5  # Lower weight for indirect evidence
                             })
-                    except Exception as e:
-                        logger.debug(f"Alternative evidence query failed: {e}")
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logger.debug("Alternative evidence query failed: %s", e)
 
-            except Exception as e:
-                logger.debug(f"Evidence retrieval failed: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.debug("Evidence retrieval failed: %s", e)
                 # Return empty evidence rather than crashing
 
         return evidence
@@ -754,7 +813,7 @@ The semantic similarity indicates potential for knowledge synthesis across these
         self,
         topic: str | None = None,
         confidence_threshold: float = 0.8
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """
         Generate insights on-demand for a specific topic or generally.
 
@@ -765,7 +824,7 @@ The semantic similarity indicates potential for knowledge synthesis across these
         Returns:
             list of generated insights
         """
-        logger.info(f"Generating insights for topic: {topic or 'general'}")
+        logger.info("Generating insights for topic: %s", topic or 'general')
 
         # Refresh analysis graph
         await self._build_analysis_graph()
@@ -784,13 +843,17 @@ The semantic similarity indicates potential for knowledge synthesis across these
                 insight = await self._generate_insight_from_pattern(pattern)
                 if insight and insight['confidence'] >= confidence_threshold:
                     insights.append(insight)
-            except Exception as e:
-                logger.error(f"Failed to generate insight: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to generate insight: %s", e)
 
-        logger.info(f"Generated {len(insights)} insights")
+        logger.info("Generated %d insights", len(insights))
         return insights
 
-    async def _filter_patterns_by_topic(self, patterns: list[dict], topic: str) -> list[dict]:
+    async def _filter_patterns_by_topic(
+        self,
+        patterns: list[dict[str, Any]],
+        topic: str
+    ) -> list[dict[str, Any]]:
         """Filter patterns to those relevant to a specific topic."""
         # Simple implementation - can be enhanced with semantic similarity
         filtered = []
@@ -809,11 +872,17 @@ The semantic similarity indicates potential for knowledge synthesis across these
 
         return filtered
 
-    async def search_insights(self, query: str, max_results: int = 10) -> list[dict]:
+    async def search_insights(
+        self,
+        query: str,
+        max_results: int = 10
+    ) -> list[dict[str, Any]]:
         """Search for existing insights based on a query."""
         search_query = """
         MATCH (z:Zettel)
-        WHERE z.content CONTAINS $query OR z.title CONTAINS $query OR z.topic CONTAINS $query
+        WHERE z.content CONTAINS $query
+           OR z.title CONTAINS $query
+           OR z.topic CONTAINS $query
         OPTIONAL MATCH (z)-[:SUPPORTED_BY]->(f:Fact)
         RETURN z.id as zettel_id, z.title as title, z.content as content,
                z.confidence as confidence, z.pattern_type as pattern_type,
@@ -845,7 +914,7 @@ The semantic similarity indicates potential for knowledge synthesis across these
 
         return insights
 
-    async def get_statistics(self) -> dict:
+    async def get_statistics(self) -> dict[str, Any]:
         """Get insight engine statistics."""
         # Get counts from knowledge graph
         query = """
@@ -855,7 +924,7 @@ The semantic similarity indicates potential for knowledge synthesis across these
                max(z.created_at) as last_processing
         """
 
-        stats = {
+        stats: dict[str, Any] = {
             'total_insights': 0,
             'active_patterns': 0,
             'avg_confidence': 0.0,
@@ -872,8 +941,9 @@ The semantic similarity indicates potential for knowledge synthesis across these
                 stats['total_insights'] = record['total_insights'] or 0
                 stats['avg_confidence'] = record['avg_confidence'] or 0.0
                 if record['last_processing']:
+                    last_processing_val = record['last_processing']
                     stats['last_processing'] = datetime.fromtimestamp(
-                        record['last_processing'] / 1000
+                        last_processing_val / 1000
                     ).strftime('%Y-%m-%d %H:%M:%S')
 
         stats['active_patterns'] = len(await self._detect_patterns())

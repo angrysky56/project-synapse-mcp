@@ -9,8 +9,10 @@ import asyncio
 import atexit
 import signal
 import sys
+import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import Context, FastMCP
@@ -22,6 +24,7 @@ from .data_pipeline.semantic_integrator import SemanticIntegrator
 from .data_pipeline.text_processor import TextProcessor
 from .semantic.montague_parser import MontagueParser
 from .utils.logging_config import setup_logging
+from .wiki.wiki_adapter import WikiAdapter
 from .zettelkasten.insight_engine import InsightEngine
 
 # Load environment variables
@@ -30,15 +33,17 @@ load_dotenv()
 # Configure logging for MCP (stderr only)
 logger = setup_logging(__name__)
 
+
 class SynapseServer:
     """Main Project Synapse server class managing all components."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.knowledge_graph: KnowledgeGraph | None = None
         self.montague_parser: MontagueParser | None = None
         self.insight_engine: InsightEngine | None = None
         self.text_processor: TextProcessor | None = None
         self.semantic_integrator: SemanticIntegrator | None = None
+        self.wiki_adapter: WikiAdapter | None = None
         self.background_tasks: set = set()
 
     async def initialize(self) -> None:
@@ -65,14 +70,18 @@ class SynapseServer:
             # Initialize insight engine
             self.insight_engine = InsightEngine(
                 knowledge_graph=self.knowledge_graph,
-                montague_parser=self.montague_parser
+                montague_parser=self.montague_parser,
             )
             await self.insight_engine.initialize()
 
+            # Initialize wiki adapter
+            self.wiki_adapter = WikiAdapter()
+            await self.wiki_adapter.initialize()
+
             logger.info("All components initialized successfully")
 
-        except Exception as e:
-            logger.error(f"Failed to initialize server components: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Failed to initialize server components: %s", e)
             raise
 
     async def cleanup(self) -> None:
@@ -93,11 +102,13 @@ class SynapseServer:
 
         logger.info("Server cleanup completed")
 
+
 # Global server instance
 synapse_server = SynapseServer()
 
+
 @asynccontextmanager
-async def lifespan_context(mcp: FastMCP) -> AsyncIterator[dict]:
+async def lifespan_context(_: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server lifecycle with proper cleanup."""
     logger.info("Starting Project Synapse MCP server")
 
@@ -114,37 +125,37 @@ async def lifespan_context(mcp: FastMCP) -> AsyncIterator[dict]:
 
         yield {"synapse": synapse_server}
 
-    except Exception as e:
-        logger.error(f"Server startup failed: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Server startup failed: %s", e)
         raise
     finally:
         await synapse_server.cleanup()
 
+
 # Initialize MCP server with lifespan management
-mcp = FastMCP(
-    name="project-synapse",
-    lifespan=lifespan_context
-)
+mcp = FastMCP(name="project-synapse", lifespan=lifespan_context)
 # =============================================================================
 # MCP TOOLS - Knowledge Synthesis and Retrieval
 # =============================================================================
 
+
 @mcp.tool()
-async def debug_test(ctx: Context) -> str:
+async def debug_test(_: Context) -> str:
     """Simple test tool to check if MCP server is working."""
     try:
         logger.info("Debug test tool called")
         return "✅ MCP server is working correctly!"
-    except Exception as e:
-        logger.error(f"Debug test failed: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Debug test failed: %s", e)
         return f"❌ Debug test failed: {str(e)}"
+
 
 @mcp.tool()
 async def ingest_text(
     ctx: Context,
     text: str,
     source: str = "user_input",
-    metadata: dict | None = None
+    metadata: dict[str, Any] | None = None
 ) -> str:
     """
     Ingest and process text into the knowledge graph using semantic analysis.
@@ -164,8 +175,8 @@ async def ingest_text(
         Processing summary with entities and relationships extracted
     """
     try:
-        await ctx.info(f"Ingesting text from source: {source}")
-        logger.info(f"Starting text ingestion: {text[:50]}...")
+        await ctx.info("Ingesting text from source: %s", source)
+        logger.info("Starting text ingestion: %s...", text[:50])
 
         synapse = ctx.request_context.lifespan_context["synapse"]
         logger.info("Retrieved synapse server instance")
@@ -173,13 +184,14 @@ async def ingest_text(
         # Process text through semantic pipeline
         logger.info("About to call semantic integrator...")
         try:
-            processed_data = await synapse.semantic_integrator.process_text_with_semantics(
-                text, source, metadata or {}
+            processed_data = (
+                await synapse.semantic_integrator.process_text_with_semantics(
+                    text, source, metadata or {}
+                )
             )
             logger.info("Semantic processing completed successfully")
         except Exception as semantic_error:
-            logger.error(f"Semantic processing failed: {semantic_error}")
-            import traceback
+            logger.error("Semantic processing failed: %s", semantic_error)
             traceback.print_exc()
             raise
 
@@ -189,32 +201,31 @@ async def ingest_text(
             result = await synapse.knowledge_graph.store_processed_data(processed_data)
             logger.info("Knowledge graph storage completed successfully")
         except Exception as storage_error:
-            logger.error(f"Knowledge graph storage failed: {storage_error}")
-            import traceback
+            logger.error("Knowledge graph storage failed: %s", storage_error)
             traceback.print_exc()
             raise
 
         await ctx.info("Text ingestion completed successfully")
 
-        return f"""Text ingestion completed successfully.
+        return (
+            "Text ingestion completed successfully.\n\n"
+            "Extracted:\n"
+            f"- {result['entities_count']} entities\n"
+            f"- {result['relationships_count']} relationships\n"
+            f"- {result['facts_count']} semantic facts\n\n"
+            f"Knowledge graph updated with {result['new_nodes']} new nodes and "
+            f"{result['new_edges']} new edges.\n"
+            "Automatic insight generation triggered."
+        )
 
-Extracted:
-- {result['entities_count']} entities
-- {result['relationships_count']} relationships
-- {result['facts_count']} semantic facts
-
-Knowledge graph updated with {result['new_nodes']} new nodes and {result['new_edges']} new edges.
-Automatic insight generation triggered."""
-
-    except Exception as e:
-        logger.error(f"Text ingestion failed: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Text ingestion failed: %s", e)
         return f"Error during text ingestion: {str(e)}"
+
 
 @mcp.tool()
 async def generate_insights(
-    ctx: Context,
-    topic: str | None = None,
-    confidence_threshold: float = 0.8
+    ctx: Context, topic: str | None = None, confidence_threshold: float = 0.8
 ) -> str:
     """
     Trigger autonomous insight generation using the Zettelkasten engine.
@@ -235,33 +246,30 @@ async def generate_insights(
         synapse = ctx.request_context.lifespan_context["synapse"]
 
         insights = await synapse.insight_engine.generate_insights(
-            topic=topic,
-            confidence_threshold=confidence_threshold
+            topic=topic, confidence_threshold=confidence_threshold
         )
 
         if not insights:
             return "No new insights generated above the confidence threshold."
 
-        result = "🧠 **Autonomous Insights Generated**\n\n"
+        result_buffer = ["🧠 **Autonomous Insights Generated**\n\n"]
 
         for i, insight in enumerate(insights, 1):
-            result += f"""**Insight {i}** (Confidence: {insight['confidence']:.2f})
-{insight['content']}
+            result_buffer.append(
+                f"**Insight {i}** (Confidence: {insight['confidence']:.2f})\n"
+                f"{insight['content']}\n\n"
+                f"*Evidence Trail:* {len(insight['evidence'])} supporting facts\n"
+                f"*Pattern Type:* {insight['pattern_type']}\n"
+                f"*Zettel ID:* {insight['zettel_id']}\n\n---\n\n"
+            )
 
-*Evidence Trail:* {len(insight['evidence'])} supporting facts
-*Pattern Type:* {insight['pattern_type']}
-*Zettel ID:* {insight['zettel_id']}
+        await ctx.info("Generated %d new insights", len(insights))
+        return "".join(result_buffer)
 
----
-
-"""
-
-        await ctx.info(f"Generated {len(insights)} new insights")
-        return result
-
-    except Exception as e:
-        logger.error(f"Insight generation failed: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Insight generation failed: %s", e)
         return f"Error during insight generation: {str(e)}"
+
 
 @mcp.tool()
 async def query_knowledge(
@@ -285,15 +293,15 @@ async def query_knowledge(
         Query results with facts, insights, and reasoning trails
     """
     try:
-        await ctx.info(f"Processing knowledge query: {query[:50]}...")
+        await ctx.info("Processing knowledge query: %s...", query[:50])
 
         synapse = ctx.request_context.lifespan_context["synapse"]
 
         # First, check for relevant insights (Zettelkasten-first approach)
-        insights = []
+        insights: list[dict[str, Any]] = []
         if include_insights:
             insights = await synapse.insight_engine.search_insights(
-                query, max_results=max_results//2
+                query, max_results=max_results // 2
             )
 
         # Then query for factual information
@@ -301,33 +309,34 @@ async def query_knowledge(
             query, max_results=max_results
         )
 
-        result = "🔍 **Knowledge Query Results**\n\n"
+        result_buffer = ["🔍 **Knowledge Query Results**\n\n"]
 
         if insights:
-            result += "**💡 Relevant Insights:**\n\n"
+            result_buffer.append("**💡 Relevant Insights:**\n\n")
             for insight in insights:
-                result += f"""- **{insight['title']}** (Confidence: {insight['confidence']:.2f})
-  {insight['content']}
-  *Evidence:* {len(insight['evidence'])} supporting facts
-
-"""
+                result_buffer.append(
+                    f"- **{insight['title']}** (Confidence: {insight['confidence']:.2f})\n"
+                    f"  {insight['content']}\n"
+                    f"  *Evidence:* {len(insight['evidence'])} supporting facts\n\n"
+                )
 
         if facts:
-            result += "**📊 Factual Information:**\n\n"
+            result_buffer.append("**📊 Factual Information:**\n\n")
             for fact in facts:
-                result += f"""- {fact['statement']}
-  *Source:* {fact['source']} | *Confidence:* {fact['confidence']:.2f}
-
-"""
+                result_buffer.append(
+                    f"- {fact['statement']}\n"
+                    f"  *Source:* {fact['source']} | *Confidence:* {fact['confidence']:.2f}\n\n"
+                )
 
         if not insights and not facts:
-            result += "No relevant information found in the knowledge base."
+            result_buffer.append("No relevant information found in the knowledge base.")
 
-        return result
+        return "".join(result_buffer)
 
-    except Exception as e:
-        logger.error(f"Knowledge query failed: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Knowledge query failed: %s", e)
         return f"Error during knowledge query: {str(e)}"
+
 
 @mcp.tool()
 async def explore_connections(
@@ -351,49 +360,50 @@ async def explore_connections(
         Visual representation of connections and discovered patterns
     """
     try:
-        await ctx.info(f"Exploring connections for entity: {entity}")
+        await ctx.info("Exploring connections for entity: %s", entity)
 
         synapse = ctx.request_context.lifespan_context["synapse"]
 
         connections = await synapse.knowledge_graph.explore_entity_connections(
             entity=entity,
             depth=min(depth, 5),  # Limit depth for performance
-            connection_types=connection_types
+            connection_types=connection_types,
         )
 
         if not connections:
             return f"No connections found for entity: {entity}"
 
-        result = f"🕸️ **Connection Map for '{entity}'**\n\n"
+        result_buffer = [f"🕸️ **Connection Map for '{entity}'**\n\n"]
 
         # Group by depth level
-        by_depth = {}
+        by_depth: dict[int, list[dict[str, Any]]] = {}
         for conn in connections:
-            level = conn['depth']
+            level = conn["depth"]
             if level not in by_depth:
                 by_depth[level] = []
             by_depth[level].append(conn)
 
         for level in sorted(by_depth.keys()):
-            result += f"**Level {level} Connections:**\n"
+            result_buffer.append(f"**Level {level} Connections:**\n")
             for conn in by_depth[level]:
-                result += f"  • {conn['target_entity']} ({conn['relationship_type']})\n"
-                if conn.get('strength'):
-                    result += f"    Strength: {conn['strength']:.2f}\n"
-            result += "\n"
+                result_buffer.append(f"  • {conn['target_entity']} ({conn['relationship_type']})\n")
+                if conn.get("strength"):
+                    result_buffer.append(f"    Strength: {conn['strength']:.2f}\n")
+            result_buffer.append("\n")
 
         # Highlight unexpected connections
-        unexpected = [c for c in connections if c.get('unexpected', False)]
+        unexpected = [c for c in connections if c.get("unexpected", False)]
         if unexpected:
-            result += "🔍 **Unexpected Connections Discovered:**\n"
+            result_buffer.append("🔍 **Unexpected Connections Discovered:**\n")
             for conn in unexpected:
-                result += f"  • {entity} → {conn['target_entity']} via {conn['path']}\n"
+                result_buffer.append(f"  • {entity} → {conn['target_entity']} via {conn['path']}\n")
 
-        return result
+        return "".join(result_buffer)
 
-    except Exception as e:
-        logger.error(f"Connection exploration failed: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Connection exploration failed: %s", e)
         return f"Error exploring connections: {str(e)}"
+
 
 @mcp.tool()
 async def analyze_semantic_structure(
@@ -421,39 +431,273 @@ async def analyze_semantic_structure(
 
         analysis = await synapse.montague_parser.parse_text(text)
 
-        result = "🧮 **Semantic Structure Analysis**\n\n"
-        result += f"**Input Text:** {text}\n\n"
+        result_buffer = [
+            "🧮 **Semantic Structure Analysis**\n\n",
+            f"**Input Text:** {text}\n\n"
+        ]
 
-        if analysis.get('entities'):
-            result += "**Entities Identified:**\n"
-            for entity in analysis['entities']:
-                result += f"  • {entity['text']} ({entity['type']}) - Confidence: {entity['confidence']:.2f}\n"
-            result += "\n"
+        if analysis.get("entities"):
+            result_buffer.append("**Entities Identified:**\n")
+            for entity in analysis["entities"]:
+                result_buffer.append(
+                    f"  • {entity['text']} ({entity['type']}) - "
+                    f"Confidence: {entity['confidence']:.2f}\n"
+                )
+            result_buffer.append("\n")
 
-        if analysis.get('relations'):
-            result += "**Relations Identified:**\n"
-            for relation in analysis['relations']:
-                result += f"  • {relation['subject']} {relation['predicate']} {relation['object']}\n"
-            result += "\n"
+        if analysis.get("relations"):
+            result_buffer.append("**Relations Identified:**\n")
+            for relation in analysis["relations"]:
+                result_buffer.append(
+                    f"  • {relation['subject']} {relation['predicate']} "
+                    f"{relation['object']}\n"
+                )
+            result_buffer.append("\n")
 
-        if include_logical_form and analysis.get('logical_form'):
-            result += "**Logical Form (Montague Grammar):**\n"
-            result += f"```\n{analysis['logical_form']}\n```\n\n"
+        if include_logical_form and analysis.get("logical_form"):
+            result_buffer.append("**Logical Form (Montague Grammar):**\n")
+            result_buffer.append(f"```\n{analysis['logical_form']}\n```\n\n")
 
-        if analysis.get('semantic_features'):
-            result += "**Semantic Features:**\n"
-            for feature, value in analysis['semantic_features'].items():
-                result += f"  • {feature}: {value}\n"
+        if analysis.get("semantic_features"):
+            result_buffer.append("**Semantic Features:**\n")
+            for feature, value in analysis["semantic_features"].items():
+                result_buffer.append(f"  • {feature}: {value}\n")
 
-        return result
+        return "".join(result_buffer)
 
-    except Exception as e:
-        logger.error(f"Semantic analysis failed: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Semantic analysis failed: %s", e)
         return f"Error during semantic analysis: {str(e)}"
+
+
+# =============================================================================
+# MCP TOOLS - Wiki (LLM-WIKI) Bridge
+# =============================================================================
+
+
+@mcp.tool()
+async def wiki_list_pages(ctx: Context, subdir: str = "wiki") -> str:
+    """
+    List all markdown pages in the wiki vault.
+
+    Args:
+        subdir: Subdirectory to list ('wiki' or 'raw').
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured. Set WIKI_VAULT_PATH."
+        pages = await synapse.wiki_adapter.list_pages(subdir)
+        if not pages:
+            return f"No pages found in {subdir}/"
+        lines = [f"📂 **{subdir}/** — {len(pages)} pages\n"]
+        for pg in pages:
+            lines.append(f"- `{pg['path']}` — {pg.get('summary', pg['name'])}")
+        return "\n".join(lines)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_list_pages failed: %s", e)
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def wiki_read_page(ctx: Context, path: str) -> str:
+    """
+    Read a wiki page by relative path (e.g. 'wiki/concepts/rag.md').
+
+    Args:
+        path: Relative path from vault root.
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+        data = await synapse.wiki_adapter.read_page(path)
+        if "error" in data:
+            return str(data["error"])
+        meta: dict[str, Any] = data.get("metadata", {})
+        body: str = data.get("body", "")
+        header = "\n".join(f"  {k}: {v}" for k, v in meta.items())
+        return f"**Metadata:**\n{header}\n\n**Content:**\n{body}"
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_read_page failed: %s", e)
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def wiki_write_page(
+    ctx: Context,
+    path: str,
+    body: str,
+    summary: str = "",
+    tags: str = "",
+) -> str:
+    """
+    Write or update a wiki page with frontmatter.
+
+    Args:
+        path: Relative path (e.g. 'wiki/entities/neo4j.md').
+        body: Markdown body content.
+        summary: One-line summary for the index.
+        tags: Comma-separated tags.
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+        meta: dict[str, Any] = {}
+        if summary:
+            meta["summary"] = summary
+        if tags:
+            meta["tags"] = [t.strip() for t in tags.split(",")]
+        result = await synapse.wiki_adapter.write_page(path, body, meta)
+        await synapse.wiki_adapter.append_log("write", f"Updated page: {path}")
+        return str(result)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_write_page failed: %s", e)
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def wiki_search(ctx: Context, query: str) -> str:
+    """Search wiki pages by keyword.
+
+    Args:
+        query: Space-separated search terms.
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+        results = await synapse.wiki_adapter.search_pages(query)
+        if not results:
+            return f"No pages matched: {query}"
+        lines = [f"🔍 {len(results)} results for '{query}'\n"]
+        for r in results:
+            lines.append(f"- `{r['path']}`")
+        return "\n".join(lines)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_search failed: %s", e)
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def wiki_lint(ctx: Context) -> str:
+    """Run a health check on the wiki vault.
+
+    Detects orphan pages, broken wikilinks, and missing frontmatter.
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+        report = await synapse.wiki_adapter.lint()
+        lines = [f"🩺 **Wiki Health Check** — {report['total_pages']} pages\n"]
+        if report["orphan_pages"]:
+            lines.append(f"**Orphans** ({len(report['orphan_pages'])}):")
+            for o in report["orphan_pages"]:
+                lines.append(f"  - {o}")
+        if report["broken_links"]:
+            lines.append(f"**Broken links** ({len(report['broken_links'])}):")
+            for bl in report["broken_links"]:
+                lines.append(f"  - {bl['source']} → [[{bl['target']}]]")
+        if report["missing_frontmatter"]:
+            lines.append(
+                f"**Missing frontmatter** ({len(report['missing_frontmatter'])}):"
+            )
+            for mf in report["missing_frontmatter"]:
+                lines.append(f"  - {mf}")
+        if not any(
+            [
+                report["orphan_pages"],
+                report["broken_links"],
+                report["missing_frontmatter"],
+            ]
+        ):
+            lines.append("✅ All clear — no issues found.")
+        await synapse.wiki_adapter.append_log("lint", "\n".join(lines))
+        return "\n".join(lines)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_lint failed: %s", e)
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def wiki_update_index(ctx: Context) -> str:
+    """Rebuild the wiki index from all wiki pages."""
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+        result = await synapse.wiki_adapter.update_index()
+        await synapse.wiki_adapter.append_log("index", result)
+        return str(result)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_update_index failed: %s", e)
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def wiki_ingest_raw(
+    ctx: Context,
+    filename: str,
+) -> str:
+    """
+    Read a raw source file and ingest it into both the knowledge graph and wiki.
+
+    Reads from raw/, runs it through the Synapse semantic pipeline,
+    stores in Neo4j, and creates a summary page in wiki/sources/.
+
+    Args:
+        filename: Filename inside the raw/ directory.
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+
+        # Read raw file
+        raw_data = await synapse.wiki_adapter.read_page(f"raw/{filename}")
+        if "error" in raw_data:
+            return str(raw_data["error"])
+        body = raw_data.get("body", "")
+        if not body.strip():
+            return f"Empty file: raw/{filename}"
+
+        # Ingest into knowledge graph
+        kg_result = None
+        if synapse.semantic_integrator and synapse.knowledge_graph:
+            processed = await synapse.semantic_integrator.process_text_with_semantics(
+                body, f"raw/{filename}", raw_data.get("metadata", {})
+            )
+            kg_result = await synapse.knowledge_graph.store_processed_data(processed)
+
+        # Log
+        summary = body[:200].replace("\n", " ") + "..."
+        await synapse.wiki_adapter.append_log(
+            f"ingest | {filename}",
+            f"Ingested raw/{filename} into knowledge graph.\n\nPreview: {summary}",
+        )
+
+        parts = [f"✅ Ingested `raw/{filename}`"]
+        if kg_result:
+            parts.append(
+                f"  Graph: {kg_result['new_nodes']} nodes, "
+                f"{kg_result['new_edges']} edges added"
+            )
+        parts.append(
+            "\nNext: Use `wiki_write_page` to create a summary page in "
+            "`wiki/sources/` and update relevant entity/concept pages."
+        )
+        return "\n".join(parts)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_ingest_raw failed: %s", e)
+        return f"Error: {e}"
+
 
 # =============================================================================
 # MCP RESOURCES - Knowledge Base Access
 # =============================================================================
+
 
 @mcp.resource("synapse://knowledge_stats")
 async def knowledge_statistics() -> str:
@@ -477,10 +721,10 @@ async def knowledge_statistics() -> str:
             insight_stats = await synapse.insight_engine.get_statistics()
         else:
             insight_stats = {
-                'total_insights': 0,
-                'active_patterns': 0,
-                'avg_confidence': 0.0,
-                'last_processing': 'N/A'
+                "total_insights": 0,
+                "active_patterns": 0,
+                "avg_confidence": 0.0,
+                "last_processing": "N/A",
             }
 
         return f"""📊 **Project Synapse Knowledge Statistics**
@@ -508,9 +752,10 @@ async def knowledge_statistics() -> str:
 - Active Connections: {stats['active_connections']}
 """
 
-    except Exception as e:
-        logger.error(f"Failed to get knowledge statistics: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Failed to get knowledge statistics: %s", e)
         return f"Error retrieving statistics: {str(e)}"
+
 
 @mcp.resource("synapse://insights/{topic}")
 async def topic_insights(topic: str) -> str:
@@ -544,24 +789,30 @@ Confidence: {insight['confidence']:.3f} | Created: {insight['created_at']}
 
 *Evidence Trail:*
 """
-            for evidence in insight['evidence'][:3]:  # Show top 3 evidence items
-                result += f"  • {evidence['statement']} (Source: {evidence['source']})\n"
+            for evidence in insight["evidence"][:3]:  # Show top 3 evidence items
+                result += (
+                    f"  • {evidence['statement']} (Source: {evidence['source']})\n"
+                )
 
-            if len(insight['evidence']) > 3:
-                result += f"  ... and {len(insight['evidence']) - 3} more evidence items\n"
+            if len(insight["evidence"]) > 3:
+                result += (
+                    f"  ... and {len(insight['evidence']) - 3} more evidence items\n"
+                )
 
             result += f"\n*Pattern Type:* {insight['pattern_type']}\n"
             result += f"*Zettel ID:* {insight['zettel_id']}\n\n---\n\n"
 
-        return result
+        return str(result)
 
-    except Exception as e:
-        logger.error(f"Failed to retrieve topic insights: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Failed to retrieve topic insights: %s", e)
         return f"Error retrieving insights for topic '{topic}': {str(e)}"
+
 
 # =============================================================================
 # MCP PROMPTS - AI Guidance Templates
 # =============================================================================
+
 
 @mcp.prompt()
 def knowledge_synthesis_prompt(topic: str, context: str = "") -> str:
@@ -598,6 +849,7 @@ Focus on creating atomic, linkable insights that can be integrated into a broade
 
 Format your response to facilitate both human understanding and automated processing."""
 
+
 @mcp.prompt()
 def semantic_analysis_prompt(text: str) -> list[base.Message]:
     """
@@ -611,24 +863,33 @@ def semantic_analysis_prompt(text: str) -> list[base.Message]:
     """
     return [
         base.UserMessage(
-            content=f"""Perform a comprehensive semantic analysis of the following text using Montague Grammar principles:
-
-"{text}"
-
-Please analyze:
-1. Logical structure and compositional semantics
-2. Entity-relationship extraction
-3. Semantic ambiguities and resolutions
-4. Truth-conditional meaning
-5. Presuppositions and implications"""
+            content=(
+                f"Perform a comprehensive semantic analysis of the following "
+                f"text using Montague Grammar principles:\n\n\"{text}\"\n\n"
+                "Please analyze:\n"
+                "1. Logical structure and compositional semantics\n"
+                "2. Entity-relationship extraction\n"
+                "3. Semantic ambiguities and resolutions\n"
+                "4. Truth-conditional meaning\n"
+                "5. Presuppositions and implications"
+            )
         ),
         base.AssistantMessage(
-            content="I'll analyze this text using formal semantic methods. Let me break down the logical structure and identify the key semantic components systematically."
+            content=(
+                "I'll analyze this text using formal semantic methods. "
+                "Let me break down the logical structure and identify the "
+                "key semantic components systematically."
+            )
         ),
         base.UserMessage(
-            content="Focus particularly on how the semantic components can be represented as atomic facts in a knowledge graph, and identify any patterns that might indicate deeper insights."
-        )
+            content=(
+                "Focus particularly on how the semantic components can be "
+                "represented as atomic facts in a knowledge graph, and identify "
+                "any patterns that might indicate deeper insights."
+            )
+        ),
     ]
+
 
 @mcp.prompt()
 def insight_validation_prompt(insight: str, evidence: str) -> str:
@@ -659,9 +920,11 @@ Evaluation criteria:
 
 Provide a structured assessment with a recommended confidence score and suggestions for strengthening the insight if needed."""
 
+
 # =============================================================================
 # PROCESS CLEANUP & SERVER MANAGEMENT
 # =============================================================================
+
 
 def cleanup_processes() -> None:
     """Clean up all processes and background tasks on shutdown."""
@@ -670,19 +933,22 @@ def cleanup_processes() -> None:
     # Run async cleanup
     try:
         asyncio.run(synapse_server.cleanup())
-    except Exception as e:
-        logger.error(f"Error during cleanup: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Error during cleanup: %s", e)
 
-def signal_handler(signum: int, frame) -> None:
+
+def signal_handler(signum: int, _: Any) -> None:
     """Handle shutdown signals gracefully."""
-    logger.info(f"Received signal {signum}, shutting down gracefully")
+    logger.info("Received signal %s, shutting down gracefully", signum)
     cleanup_processes()
     sys.exit(0)
+
 
 # Register cleanup handlers
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 atexit.register(cleanup_processes)
+
 
 def main() -> None:
     """Main entry point for the MCP server."""
@@ -691,11 +957,12 @@ def main() -> None:
         mcp.run()
     except KeyboardInterrupt:
         logger.info("Server interrupted by user")
-    except Exception as e:
-        logger.error(f"Server error: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Server error: %s", e)
         raise
     finally:
         cleanup_processes()
+
 
 if __name__ == "__main__":
     main()

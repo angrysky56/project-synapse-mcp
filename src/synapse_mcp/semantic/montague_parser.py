@@ -5,13 +5,13 @@ This module implements the Semantic Blueprint component, providing
 formal semantic analysis and logical form generation for natural language.
 """
 
-import asyncio
-import logging
 import re
+import subprocess
 from typing import Any
 
-import spacy
-from spacy.language import Language
+import spacy  # type: ignore[import-untyped]
+from spacy.language import Language  # type: ignore[import-untyped]
+from spacy.tokens import Doc, Span, Token  # type: ignore[import-untyped]
 
 from ..utils.logging_config import get_logger
 
@@ -26,7 +26,7 @@ class MontagueParser:
     and lambda calculus for precise meaning representation.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.nlp: Language | None = None
         self.entity_types = {
             'PERSON', 'ORG', 'GPE', 'LOC', 'PRODUCT',
@@ -43,13 +43,12 @@ class MontagueParser:
         except OSError:
             logger.warning("spaCy model not found, downloading...")
             # In production, this should be handled during setup
-            import subprocess
-            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True)
             self.nlp = spacy.load("en_core_web_sm")
             logger.info("Downloaded and loaded spaCy model")
 
-        except Exception as e:
-            logger.error(f"Failed to initialize Montague parser: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Failed to initialize Montague parser: %s", e)
             raise
 
     async def parse_text(self, text: str) -> dict[str, Any]:
@@ -65,27 +64,30 @@ class MontagueParser:
         if not self.nlp:
             raise ValueError("Parser not initialized")
 
-        logger.debug(f"Parsing text: {text[:100]}...")
+        logger.debug("Parsing text: %s...", text[:100])
 
         # Process with spaCy
         doc = self.nlp(text)
 
         # Extract semantic components
         analysis = {
-            'original_text': text,
-            'entities': await self._extract_entities(doc),
-            'relations': await self._extract_relations(doc),
-            'logical_form': await self._generate_logical_form(doc),
-            'semantic_features': await self._extract_semantic_features(doc),
-            'propositions': await self._extract_propositions(doc)
+            "original_text": text,
+            "entities": await self._extract_entities(doc),
+            "relations": await self._extract_relations(doc),
+            "logical_form": await self._generate_logical_form(doc),
+            "semantic_features": await self._extract_semantic_features(doc),
+            "propositions": await self._extract_propositions(doc),
         }
 
-        logger.debug(f"Extracted {len(analysis['entities'])} entities, "
-                    f"{len(analysis['relations'])} relations")
+        logger.debug(
+            "Extracted %d entities, %d relations",
+            len(analysis["entities"]),
+            len(analysis["relations"]),
+        )
 
         return analysis
 
-    async def _extract_entities(self, doc) -> list[dict]:
+    async def _extract_entities(self, doc: Doc) -> list[dict[str, Any]]:
         """Extract named entities with type and confidence information."""
         entities = []
 
@@ -94,18 +96,18 @@ class MontagueParser:
             confidence = self._calculate_entity_confidence(ent)
 
             entities.append({
-                'text': ent.text,
-                'label': ent.label_,
-                'type': self._normalize_entity_type(ent.label_),
-                'start': ent.start_char,
-                'end': ent.end_char,
-                'confidence': confidence,
-                'id': self._generate_entity_id(ent.text, ent.label_)
+                "text": ent.text,
+                "label": ent.label_,
+                "type": self._normalize_entity_type(ent.label_),
+                "start": ent.start_char,
+                "end": ent.end_char,
+                "confidence": confidence,
+                "id": self._generate_entity_id(ent.text, ent.label_),
             })
 
         return entities
 
-    async def _extract_relations(self, doc) -> list[dict]:
+    async def _extract_relations(self, doc: Doc) -> list[dict[str, Any]]:
         """Extract semantic relations between entities and key noun phrases."""
         relations = []
 
@@ -114,7 +116,7 @@ class MontagueParser:
 
         # Strategy 1: Subject-Verb-Object patterns
         for token in doc:
-            if token.dep_ in ['nsubj', 'nsubjpass']:
+            if token.dep_ in ["nsubj", "nsubjpass"]:
                 head = token.head
 
                 # Get subject (prefer entity, fall back to noun chunk)
@@ -126,12 +128,12 @@ class MontagueParser:
                     continue
 
                 # Get predicate
-                predicate = head.lemma_ if head.pos_ == 'VERB' else head.text
+                predicate = head.lemma_ if head.pos_ == "VERB" else head.text
 
                 # Find object
                 obj = None
                 for child in head.children:
-                    if child.dep_ in ['dobj', 'attr', 'pobj']:
+                    if child.dep_ in ["dobj", "attr", "pobj"]:
                         obj = self._find_entity_for_token(doc, child)
                         if not obj and child.i in noun_chunks:
                             obj = noun_chunks[child.i]
@@ -140,46 +142,46 @@ class MontagueParser:
 
                 if subject and obj:
                     relations.append({
-                        'subject': subject,
-                        'predicate': predicate,
-                        'object': obj,
-                        'confidence': 0.8,
-                        'source_span': f"{token.i}-{head.i}"
+                        "subject": subject,
+                        "predicate": predicate,
+                        "object": obj,
+                        "confidence": 0.8,
+                        "source_span": f"{token.i}-{head.i}",
                     })
 
         # Strategy 2: Copula/Linking verb patterns (is, are, becomes, equals)
         for token in doc:
-            if token.lemma_ in ['be', 'become', 'equal', 'represent', 'constitute']:
+            if token.lemma_ in ["be", "become", "equal", "represent", "constitute"]:
                 # Find subject
-                subject = None
+                cop_subject: str | None = None
                 for child in token.children:
-                    if child.dep_ in ['nsubj', 'nsubjpass']:
-                        subject = self._find_entity_for_token(doc, child)
-                        if not subject and child.i in noun_chunks:
-                            subject = noun_chunks[child.i]
+                    if child.dep_ in ["nsubj", "nsubjpass"]:
+                        cop_subject = self._find_entity_for_token(doc, child)
+                        if not cop_subject and child.i in noun_chunks:
+                            cop_subject = str(noun_chunks[child.i])
                         break
 
                 # Find complement/attribute
-                obj = None
+                cop_obj: str | None = None
                 for child in token.children:
-                    if child.dep_ in ['attr', 'acomp', 'dobj']:
-                        obj = self._find_entity_for_token(doc, child)
-                        if not obj and child.i in noun_chunks:
-                            obj = noun_chunks[child.i]
+                    if child.dep_ in ["attr", "acomp", "dobj"]:
+                        cop_obj = self._find_entity_for_token(doc, child)
+                        if not cop_obj and child.i in noun_chunks:
+                            cop_obj = str(noun_chunks[child.i])
                         break
 
-                if subject and obj:
+                if cop_subject and cop_obj:
                     relations.append({
-                        'subject': subject,
-                        'predicate': f"is-{token.lemma_}",
-                        'object': obj,
-                        'confidence': 0.75,
-                        'source_span': f"{token.i}"
+                        "subject": cop_subject,
+                        "predicate": f"is-{token.lemma_}",
+                        "object": cop_obj,
+                        "confidence": 0.75,
+                        "source_span": f"{token.i}",
                     })
 
         # Strategy 3: Prepositional relationships
         for token in doc:
-            if token.dep_ == 'prep' and token.head.pos_ in ['NOUN', 'PROPN', 'VERB']:
+            if token.dep_ == "prep" and token.head.pos_ in ["NOUN", "PROPN", "VERB"]:
                 # Get the noun being modified
                 subject = self._find_entity_for_token(doc, token.head)
                 if not subject and token.head.i in noun_chunks:
@@ -188,7 +190,7 @@ class MontagueParser:
                 # Get the object of the preposition
                 obj = None
                 for child in token.children:
-                    if child.dep_ == 'pobj':
+                    if child.dep_ == "pobj":
                         obj = self._find_entity_for_token(doc, child)
                         if not obj and child.i in noun_chunks:
                             obj = noun_chunks[child.i]
@@ -196,32 +198,37 @@ class MontagueParser:
 
                 if subject and obj:
                     relations.append({
-                        'subject': subject,
-                        'predicate': f"relates-via-{token.text}",
-                        'object': obj,
-                        'confidence': 0.7,
-                        'source_span': f"{token.head.i}-{token.i}"
+                        "subject": subject,
+                        "predicate": f"relates-via-{token.text}",
+                        "object": obj,
+                        "confidence": 0.7,
+                        "source_span": f"{token.head.i}-{token.i}",
                     })
 
         # Strategy 4: Compound and possessive patterns
         for token in doc:
-            if token.dep_ in ['compound', 'poss'] and token.head.pos_ in ['NOUN', 'PROPN']:
+            if (
+                token.dep_ in ["compound", "poss"]
+                and token.head.pos_ in ["NOUN", "PROPN"]
+            ):
                 subject = token.text
                 obj = token.head.text
 
                 if len(subject) > 2 and len(obj) > 2:  # Filter very short words
-                    relation_type = 'modifies' if token.dep_ == 'compound' else 'possesses'
+                    relation_type = (
+                        "modifies" if token.dep_ == "compound" else "possesses"
+                    )
                     relations.append({
-                        'subject': subject,
-                        'predicate': relation_type,
-                        'object': obj,
-                        'confidence': 0.65,
-                        'source_span': f"{token.i}-{token.head.i}"
+                        "subject": subject,
+                        "predicate": relation_type,
+                        "object": obj,
+                        "confidence": 0.65,
+                        "source_span": f"{token.i}-{token.head.i}",
                     })
 
         return relations
 
-    async def _generate_logical_form(self, doc) -> str:
+    async def _generate_logical_form(self, doc: Doc) -> str:
         """
         Generate logical form representation using lambda calculus.
 
@@ -245,41 +252,48 @@ class MontagueParser:
 
         return " ∧ ".join(logical_forms) if logical_forms else ""
 
-    async def _extract_semantic_features(self, doc) -> dict[str, Any]:
+    async def _extract_semantic_features(self, doc: Doc) -> dict[str, Any]:
         """Extract semantic features from the parsed document."""
         features = {
-            'sentence_count': len(list(doc.sents)),
-            'entity_count': len(doc.ents),
-            'token_count': len(doc),
-            'has_negation': any(token.dep_ == 'neg' for token in doc),
-            'tense': self._extract_tense(doc),
-            'modality': self._extract_modality(doc),
-            'sentiment_polarity': 'neutral'  # Placeholder
+            "sentence_count": len(list(doc.sents)),
+            "entity_count": len(doc.ents),
+            "token_count": len(doc),
+            "has_negation": any(token.dep_ == "neg" for token in doc),
+            "tense": self._extract_tense(doc),
+            "modality": self._extract_modality(doc),
+            "sentiment_polarity": "neutral",  # Placeholder
         }
 
         return features
 
-    async def _extract_propositions(self, doc) -> list[dict]:
+    async def _extract_propositions(self, doc: Doc) -> list[dict[str, Any]]:
         """Extract atomic propositions that can be stored as facts."""
         propositions = []
 
         for sent in doc.sents:
             # Each sentence potentially represents a proposition
-            entities_in_sent = [ent for ent in doc.ents if ent.start >= sent.start and ent.end <= sent.end]
+            entities_in_sent = [
+                ent
+                for ent in doc.ents
+                if ent.start >= sent.start and ent.end <= sent.end
+            ]
 
             if entities_in_sent:
                 proposition = {
-                    'id': f"prop_{sent.start}_{sent.end}",
-                    'content': sent.text.strip(),
-                    'entities': [self._generate_entity_id(ent.text, ent.label_) for ent in entities_in_sent],
-                    'confidence': 0.9,  # High confidence for direct extraction
-                    'logical_form': await self._generate_logical_form_for_sentence(sent)
+                    "id": f"prop_{sent.start}_{sent.end}",
+                    "content": sent.text.strip(),
+                    "entities": [
+                        self._generate_entity_id(ent.text, ent.label_)
+                        for ent in entities_in_sent
+                    ],
+                    "confidence": 0.9,  # High confidence for direct extraction
+                    "logical_form": await self._generate_logical_form_for_sentence(sent),
                 }
                 propositions.append(proposition)
 
         return propositions
 
-    def _calculate_entity_confidence(self, ent) -> float:
+    def _calculate_entity_confidence(self, ent: Span) -> float:
         """Calculate confidence score for an entity."""
         base_confidence = 0.8
 
@@ -322,45 +336,57 @@ class MontagueParser:
         normalized = re.sub(r'[^a-zA-Z0-9]', '_', text.lower())
         return f"{label.lower()}_{normalized}"
 
-    def _find_entity_for_token(self, doc, token) -> str | None:
+    def _find_entity_for_token(self, doc: Doc, token: Token) -> str:
         """Find if a token is part of a named entity."""
         for ent in doc.ents:
             if token.i >= ent.start and token.i < ent.end:
-                return ent.text
-        return token.text
+                return str(ent.text)
+        return str(token.text)
 
-    def _extract_svo_pattern(self, sent) -> tuple[Any | None, Any | None, Any | None]:
+    def _extract_svo_pattern(
+        self, sent: Span
+    ) -> tuple[Token | None, Token | None, Token | None]:
         """Extract Subject-Verb-Object pattern from a sentence."""
         subject = None
         verb = None
         obj = None
 
         for token in sent:
-            if token.dep_ == 'nsubj':
+            if token.dep_ == "nsubj":
                 subject = token
-            elif token.pos_ == 'VERB' and token.dep_ == 'ROOT':
+            elif token.pos_ == "VERB" and token.dep_ == "ROOT":
                 verb = token
-            elif token.dep_ in ['dobj', 'pobj']:
+            elif token.dep_ in ["dobj", "pobj"]:
                 obj = token
 
         return subject, verb, obj
 
-    def _extract_tense(self, doc) -> str:
+    def _extract_tense(self, doc: Doc) -> str:
         """Extract tense information from the document."""
         for token in doc:
-            if token.pos_ == 'VERB' and token.tag_:
-                if 'VBD' in token.tag_ or 'VBN' in token.tag_:
-                    return 'past'
-                elif 'VBG' in token.tag_:
-                    return 'present_continuous'
-                elif 'VBZ' in token.tag_ or 'VBP' in token.tag_:
-                    return 'present'
-        return 'unknown'
+            if token.pos_ == "VERB" and token.tag_:
+                if "VBD" in token.tag_ or "VBN" in token.tag_:
+                    return "past"
+                if "VBG" in token.tag_:
+                    return "present_continuous"
+                if "VBZ" in token.tag_ or "VBP" in token.tag_:
+                    return "present"
+        return "unknown"
 
-    def _extract_modality(self, doc) -> list[str]:
+    def _extract_modality(self, doc: Doc) -> list[str]:
         """Extract modal verbs and expressions."""
         modals = []
-        modal_verbs = {'can', 'could', 'may', 'might', 'must', 'shall', 'should', 'will', 'would'}
+        modal_verbs = {
+            "can",
+            "could",
+            "may",
+            "might",
+            "must",
+            "shall",
+            "should",
+            "will",
+            "would",
+        }
 
         for token in doc:
             if token.lemma_.lower() in modal_verbs:
@@ -368,15 +394,17 @@ class MontagueParser:
 
         return modals
 
-    async def _generate_logical_form_for_sentence(self, sent) -> str:
+    async def _generate_logical_form_for_sentence(self, sent: Span) -> str:
         """Generate logical form for a specific sentence."""
         # Simplified logical form generation
         subject, verb, obj = self._extract_svo_pattern(sent)
 
         if subject and verb:
             if obj:
-                return f"∃x∃y({subject.lemma_}(x) ∧ {obj.lemma_}(y) ∧ {verb.lemma_}(x,y))"
-            else:
-                return f"∃x({subject.lemma_}(x) ∧ {verb.lemma_}(x))"
+                return (
+                    f"∃x∃y({subject.lemma_}(x) ∧ {obj.lemma_}(y) ∧ "
+                    f"{verb.lemma_}(x,y))"
+                )
+            return f"∃x({subject.lemma_}(x) ∧ {verb.lemma_}(x))"
 
         return f"proposition({sent.text[:50]}...)"

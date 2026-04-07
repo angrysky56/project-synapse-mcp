@@ -15,7 +15,9 @@
         "NEO4J_USER": "neo4j",
         "NEO4J_PASSWORD": "synapse_password",
         "NEO4J_DATABASE": "synapse",
-        "LOG_LEVEL": "INFO"
+        "LOG_LEVEL": "INFO",
+        "WIKI_VAULT_PATH": "/home/ty/Documents/LLM-WIKI",
+        "WIKI_GITHUB_REPO": "https://github.com/angrysky56/LLM-WIKI"
       }
     }
   }

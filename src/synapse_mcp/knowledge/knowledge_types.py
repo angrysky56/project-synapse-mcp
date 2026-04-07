@@ -6,7 +6,7 @@ semantic relationships, and graph operations.
 """
 
 import hashlib
-import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 @dataclass
 class Entity:
     """Represents an entity in the knowledge graph."""
+
     id: str
     name: str
     type: str
@@ -27,7 +28,8 @@ class Entity:
     source: str = "unknown"
     created_at: datetime | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Initialize default values after dataclass init."""
         if self.properties is None:
             self.properties = {}
         if self.created_at is None:
@@ -37,6 +39,7 @@ class Entity:
 @dataclass
 class Relationship:
     """Represents a relationship between entities."""
+
     source_id: str
     target_id: str
     type: str
@@ -45,7 +48,8 @@ class Relationship:
     source: str = "unknown"
     created_at: datetime | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Initialize default values after dataclass init."""
         if self.properties is None:
             self.properties = {}
         if self.created_at is None:
@@ -55,6 +59,7 @@ class Relationship:
 @dataclass
 class Fact:
     """Represents a semantic fact extracted from text."""
+
     id: str
     content: str
     logical_form: str = ""
@@ -64,7 +69,8 @@ class Fact:
     entities: list[str] | None = None
     created_at: datetime | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Initialize default values after dataclass init."""
         if self.metadata is None:
             self.metadata = {}
         if self.entities is None:
@@ -76,17 +82,19 @@ class Fact:
 @dataclass
 class Insight:
     """Represents an AI-generated insight (Zettel)."""
+
     zettel_id: str
     title: str
     content: str
     topic: str = ""
     confidence: float = 0.0
     pattern_type: str = "unknown"
-    evidence: list[dict] | None = None
+    evidence: list[dict[str, Any]] | None = None
     metadata: dict[str, Any] | None = None
     created_at: datetime | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Initialize default values after dataclass init."""
         if self.evidence is None:
             self.evidence = []
         if self.metadata is None:
@@ -101,14 +109,15 @@ class KnowledgeUtils:
     @staticmethod
     def generate_entity_id(name: str, entity_type: str) -> str:
         """Generate a unique entity ID."""
-        normalized_name = name.lower().replace(' ', '_')
+        normalized_name = name.lower().replace(" ", "_")
         content = f"{entity_type.lower()}_{normalized_name}"
         return content[:50]  # Limit length
 
     @staticmethod
     def generate_fact_id(content: str, source: str) -> str:
         """Generate a unique fact ID."""
-        content_hash = hashlib.md5(f"{content}{source}".encode()).hexdigest()[:8]
+        combined = f"{content}{source}".encode()
+        content_hash = hashlib.md5(combined, usedforsecurity=False).hexdigest()[:8]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"fact_{timestamp}_{content_hash}"
 
@@ -116,11 +125,14 @@ class KnowledgeUtils:
     def generate_zettel_id(pattern_type: str) -> str:
         """Generate a unique Zettel ID for insights."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        content_hash = hashlib.md5(f"{pattern_type}{timestamp}".encode()).hexdigest()[:8]
+        combined = f"{pattern_type}{timestamp}".encode()
+        content_hash = hashlib.md5(combined, usedforsecurity=False).hexdigest()[:8]
         return f"insight_{timestamp}_{pattern_type}_{content_hash}"
 
     @staticmethod
-    def calculate_confidence(evidence_count: int, base_confidence: float = 0.5) -> float:
+    def calculate_confidence(
+        evidence_count: int, base_confidence: float = 0.5
+    ) -> float:
         """Calculate confidence score based on evidence."""
         # Simple confidence calculation - can be enhanced
         confidence = base_confidence + (evidence_count * 0.1)
@@ -131,7 +143,7 @@ class KnowledgeUtils:
         """Validate entity data structure."""
         if not entity.id or not entity.name:
             return False
-        if entity.confidence < 0 or entity.confidence > 1:
+        if not 0 <= entity.confidence <= 1:
             return False
         return True
 
@@ -142,7 +154,7 @@ class KnowledgeUtils:
             return False
         if not relationship.type:
             return False
-        if relationship.confidence < 0 or relationship.confidence > 1:
+        if not 0 <= relationship.confidence <= 1:
             return False
         return True
 
@@ -151,34 +163,33 @@ class KnowledgeUtils:
         """Validate fact data structure."""
         if not fact.id or not fact.content:
             return False
-        if fact.confidence < 0 or fact.confidence > 1:
+        if not 0 <= fact.confidence <= 1:
             return False
         return True
 
     @staticmethod
     def normalize_relationship_type(rel_type: str) -> str:
         """Normalize relationship type to standard format."""
-        return rel_type.upper().replace(' ', '_')
+        return rel_type.upper().replace(" ", "_")
 
     @staticmethod
     def extract_keywords(text: str, max_keywords: int = 5) -> list[str]:
         """Extract keywords from text for topic classification."""
-        # Simple keyword extraction - can be enhanced with NLP
-        import re
-
         # Remove punctuation and convert to lowercase
-        clean_text = re.sub(r'[^\w\s]', '', text.lower())
+        clean_text = re.sub(r"[^\w\s]", "", text.lower())
         words = clean_text.split()
 
         # Filter out common stop words
         stop_words = {
-            'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
-            'by', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-            'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-            'should', 'may', 'might', 'must', 'can', 'this', 'that', 'these', 'those'
+            "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
+            "by", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "must", "can", "this", "that", "these", "those",
         }
 
-        keywords = [word for word in words if word not in stop_words and len(word) > 3]
+        keywords = [
+            word for word in words if word not in stop_words and len(word) > 3
+        ]
 
         # Return unique keywords, limited to max_keywords
         return list(dict.fromkeys(keywords))[:max_keywords]
@@ -188,50 +199,70 @@ class KnowledgeValidator:
     """Validator for knowledge graph data integrity."""
 
     @staticmethod
-    def validate_graph_consistency(entities: list[Entity], relationships: list[Relationship]) -> dict[str, list[str]]:
+    def validate_graph_consistency(
+        entities: list[Entity],
+        relationships: list[Relationship]
+    ) -> dict[str, list[str]]:
         """Validate consistency between entities and relationships."""
-        issues = {
-            'missing_entities': [],
-            'orphaned_relationships': [],
-            'duplicate_entities': [],
-            'invalid_confidences': []
+        issues: dict[str, list[str]] = {
+            "missing_entities": [],
+            "orphaned_relationships": [],
+            "duplicate_entities": [],
+            "invalid_confidences": [],
         }
 
         entity_ids = {entity.id for entity in entities}
-        entity_names = {}
+        entity_names: dict[str, str] = {}
 
         # Check for duplicate entities
         for entity in entities:
             if entity.name in entity_names:
-                issues['duplicate_entities'].append(f"Duplicate entity name: {entity.name}")
+                issues["duplicate_entities"].append(
+                    f"Duplicate entity name: {entity.name}"
+                )
             entity_names[entity.name] = entity.id
 
             # Check confidence values
-            if entity.confidence < 0 or entity.confidence > 1:
-                issues['invalid_confidences'].append(f"Invalid confidence for entity {entity.id}: {entity.confidence}")
+            if not 0 <= entity.confidence <= 1:
+                issues["invalid_confidences"].append(
+                    f"Invalid confidence for entity {entity.id}: {entity.confidence}"
+                )
 
         # Check relationships reference valid entities
         for relationship in relationships:
             if relationship.source_id not in entity_ids:
-                issues['missing_entities'].append(f"Relationship references missing source entity: {relationship.source_id}")
+                issues["missing_entities"].append(
+                    f"Relationship references missing source: {relationship.source_id}"
+                )
             if relationship.target_id not in entity_ids:
-                issues['missing_entities'].append(f"Relationship references missing target entity: {relationship.target_id}")
+                issues["missing_entities"].append(
+                    f"Relationship references missing target: {relationship.target_id}"
+                )
 
             # Check confidence values
-            if relationship.confidence < 0 or relationship.confidence > 1:
-                issues['invalid_confidences'].append(f"Invalid confidence for relationship {relationship.source_id}->{relationship.target_id}: {relationship.confidence}")
+            if not 0 <= relationship.confidence <= 1:
+                issues["invalid_confidences"].append(
+                    f"Invalid confidence for relationship "
+                    f"{relationship.source_id}->{relationship.target_id}: "
+                    f"{relationship.confidence}"
+                )
 
         return issues
 
     @staticmethod
-    def suggest_entity_merges(entities: list[Entity], similarity_threshold: float = 0.8) -> list[tuple[str, str]]:
+    def suggest_entity_merges(
+        entities: list[Entity],
+        similarity_threshold: float = 0.8
+    ) -> list[tuple[str, str]]:
         """Suggest entities that might be duplicates and should be merged."""
-        suggestions = []
+        suggestions: list[tuple[str, str]] = []
 
         for i, entity1 in enumerate(entities):
-            for entity2 in entities[i+1:]:
+            for entity2 in entities[i + 1 :]:
                 # Simple similarity check based on name
-                similarity = KnowledgeValidator._calculate_name_similarity(entity1.name, entity2.name)
+                similarity = KnowledgeValidator._calculate_name_similarity(
+                    entity1.name, entity2.name
+                )
                 if similarity >= similarity_threshold:
                     suggestions.append((entity1.id, entity2.id))
 
@@ -255,6 +286,10 @@ class KnowledgeValidator:
 
 # Export main classes and functions
 __all__ = [
-    'Entity', 'Relationship', 'Fact', 'Insight',
-    'KnowledgeUtils', 'KnowledgeValidator'
+    "Entity",
+    "Relationship",
+    "Fact",
+    "Insight",
+    "KnowledgeUtils",
+    "KnowledgeValidator",
 ]

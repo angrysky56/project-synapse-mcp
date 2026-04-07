@@ -8,13 +8,12 @@ preparing it for semantic analysis and knowledge extraction.
 import asyncio
 import hashlib
 import os
-import uuid
-from datetime import datetime
-from typing import Dict, List, Optional, Any, Union
-from pathlib import Path
-import aiofiles
 import re
-import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import aiofiles
 
 from ..utils.logging_config import get_logger
 
@@ -28,9 +27,10 @@ class TextProcessor:
     Handles text cleaning, normalization, and preparation for semantic analysis.
     """
 
-    def __init__(self):
-        self.supported_formats = {'.txt', '.md', '.json'}
-        self.batch_size = int(os.getenv('SEMANTIC_BATCH_SIZE', '50'))
+    def __init__(self) -> None:
+        """Initialize the text processor instance."""
+        self.supported_formats = {".txt", ".md", ".json"}
+        self.batch_size = int(os.getenv("SEMANTIC_BATCH_SIZE", "50"))
 
     async def initialize(self) -> None:
         """Initialize the text processor."""
@@ -40,8 +40,8 @@ class TextProcessor:
         self,
         text: str,
         source: str = "user_input",
-        metadata: Optional[Dict] = None
-    ) -> Dict[str, Any]:
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         Process raw text into structured data ready for knowledge graph storage.
 
@@ -53,7 +53,7 @@ class TextProcessor:
         Returns:
             Dictionary containing processed entities, relationships, and facts
         """
-        logger.debug(f"Processing text from source: {source}")
+        logger.debug("Processing text from source: %s", source)
 
         # Clean and normalize text
         cleaned_text = await self._clean_text(text)
@@ -65,15 +65,15 @@ class TextProcessor:
         text_id = self._generate_text_id(text, source)
 
         # Prepare structured data
-        processed_data = {
-            'text_id': text_id,
-            'source': source,
-            'metadata': metadata or {},
-            'processed_at': datetime.now().isoformat(),
-            'sentences': sentences,
-            'entities': [],
-            'relationships': [],
-            'facts': []
+        processed_data: dict[str, Any] = {
+            "text_id": text_id,
+            "source": source,
+            "metadata": metadata or {},
+            "processed_at": datetime.now().isoformat(),
+            "sentences": sentences,
+            "entities": [],
+            "relationships": [],
+            "facts": [],
         }
 
         # Process each sentence for facts
@@ -82,13 +82,17 @@ class TextProcessor:
                 fact = await self._create_fact_from_sentence(
                     sentence, source, text_id, i
                 )
-                processed_data['facts'].append(fact)
+                processed_data["facts"].append(fact)
 
-        logger.debug(f"Processed {len(sentences)} sentences into {len(processed_data['facts'])} facts")
+        logger.debug(
+            "Processed %d sentences into %d facts",
+            len(sentences),
+            len(processed_data["facts"]),
+        )
 
         return processed_data
 
-    async def process_file(self, file_path: Union[str, Path]) -> Dict[str, Any]:
+    async def process_file(self, file_path: str | Path) -> dict[str, Any]:
         """
         Process a text file into structured data.
 
@@ -106,27 +110,27 @@ class TextProcessor:
         if file_path.suffix not in self.supported_formats:
             raise ValueError(f"Unsupported file format: {file_path.suffix}")
 
-        logger.info(f"Processing file: {file_path}")
+        logger.info("Processing file: %s", file_path)
 
         # Read file content
-        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+        async with aiofiles.open(file_path, encoding="utf-8") as f:
             content = await f.read()
 
         # Extract metadata from file
         metadata = {
-            'file_path': str(file_path),
-            'file_size': file_path.stat().st_size,
-            'file_modified': datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(),
-            'file_format': file_path.suffix
+            "file_path": str(file_path),
+            "file_size": file_path.stat().st_size,
+            "file_modified": datetime.fromtimestamp(
+                file_path.stat().st_mtime
+            ).isoformat(),
+            "file_format": file_path.suffix,
         }
 
         return await self.process_text(
-            text=content,
-            source=f"file:{file_path.name}",
-            metadata=metadata
+            text=content, source=f"file:{file_path.name}", metadata=metadata
         )
 
-    async def process_batch(self, texts: List[Dict]) -> List[Dict]:
+    async def process_batch(self, texts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         Process multiple texts in batch for efficiency.
 
@@ -136,19 +140,19 @@ class TextProcessor:
         Returns:
             List of processed data dictionaries
         """
-        logger.info(f"Processing batch of {len(texts)} texts")
+        logger.info("Processing batch of %d texts", len(texts))
 
         # Process in chunks to avoid memory issues
-        results = []
+        results: list[dict[str, Any]] = []
         for i in range(0, len(texts), self.batch_size):
-            chunk = texts[i:i + self.batch_size]
+            chunk = texts[i : i + self.batch_size]
 
             # Process chunk concurrently
             tasks = [
                 self.process_text(
-                    text=item['text'],
-                    source=item.get('source', f'batch_item_{i}'),
-                    metadata=item.get('metadata', {})
+                    text=item["text"],
+                    source=item.get("source", f"batch_item_{i}"),
+                    metadata=item.get("metadata", {}),
                 )
                 for item in chunk
             ]
@@ -157,40 +161,45 @@ class TextProcessor:
 
             # Handle exceptions
             for j, result in enumerate(chunk_results):
-                if isinstance(result, Exception):
-                    logger.error(f"Failed to process batch item {i+j}: {result}")
+                if isinstance(result, BaseException):
+                    logger.error("Failed to process batch item %d: %s", i + j, result)
                 else:
                     results.append(result)
 
-        logger.info(f"Successfully processed {len(results)} out of {len(texts)} texts")
+        logger.info(
+            "Successfully processed %d out of %d texts", len(results), len(texts)
+        )
         return results
 
     async def _clean_text(self, text: str) -> str:
         """Clean and normalize text for processing."""
         # Remove excessive whitespace
-        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r"\s+", " ", text)
 
         # Remove special characters that might interfere with processing
         # Keep alphanumeric, spaces, and basic punctuation
         import string
-        allowed_chars = string.ascii_letters + string.digits + string.whitespace + '.,!?;:-()[]"\'/'
-        text = ''.join(char for char in text if char in allowed_chars)
+
+        allowed_chars = (
+            string.ascii_letters + string.digits + string.whitespace + ".,!?;:-()[]\"'/"
+        )
+        text = "".join(char for char in text if char in allowed_chars)
 
         # Normalize quotes (using Unicode escape sequences)
-        text = re.sub(r'[\u201C\u201D]', '"', text)  # Smart double quotes
-        text = re.sub(r'[\u2018\u2019]', "'", text)  # Smart single quotes
+        text = re.sub(r"[\u201C\u201D]", '"', text)  # Smart double quotes
+        text = re.sub(r"[\u2018\u2019]", "'", text)  # Smart single quotes
 
         # Strip and ensure text ends with punctuation
         text = text.strip()
-        if text and text[-1] not in '.!?':
-            text += '.'
+        if text and text[-1] not in ".!?":
+            text += "."
 
         return text
 
-    async def _split_sentences(self, text: str) -> List[str]:
+    async def _split_sentences(self, text: str) -> list[str]:
         """Split text into sentences using simple rules."""
         # Simple sentence splitting - can be enhanced with spaCy later
-        sentences = re.split(r'[.!?]+\s+', text)
+        sentences = re.split(r"[.!?]+\s+", text)
 
         # Clean up sentences
         cleaned_sentences = []
@@ -198,43 +207,40 @@ class TextProcessor:
             sentence = sentence.strip()
             if len(sentence) > 5:  # Skip very short fragments
                 # Ensure sentence has proper ending
-                if sentence and sentence[-1] not in '.!?':
-                    sentence += '.'
+                if sentence and sentence[-1] not in ".!?":
+                    sentence += "."
                 cleaned_sentences.append(sentence)
 
         return cleaned_sentences
 
     async def _create_fact_from_sentence(
-        self,
-        sentence: str,
-        source: str,
-        text_id: str,
-        sentence_index: int
-    ) -> Dict:
+        self, sentence: str, source: str, text_id: str, sentence_index: int
+    ) -> dict[str, Any]:
         """Create a fact record from a sentence."""
         fact_id = f"{text_id}_fact_{sentence_index}"
 
         return {
-            'id': fact_id,
-            'content': sentence,
-            'source': source,
-            'confidence': 1.0,  # High confidence for direct extraction
-            'metadata': {
-                'extraction_method': 'direct',
-                'entities': ''  # Empty string for entity list
+            "id": fact_id,
+            "content": sentence,
+            "source": source,
+            "confidence": 1.0,  # High confidence for direct extraction
+            "metadata": {
+                "extraction_method": "direct",
+                "entities": "",  # Empty string for entity list
             },
-            'entities': [],  # Will be populated by semantic analysis
-            'logical_form': ''  # Will be populated by Montague parser
+            "entities": [],  # Will be populated by semantic analysis
+            "logical_form": "",  # Will be populated by Montague parser
         }
 
     def _generate_text_id(self, text: str, source: str) -> str:
         """Generate unique identifier for text."""
         # Create hash of text + source for uniqueness
-        content_hash = hashlib.md5(f"{text}{source}".encode()).hexdigest()[:8]
+        combined = f"{text}{source}".encode()
+        content_hash = hashlib.md5(combined, usedforsecurity=False).hexdigest()[:8]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"text_{timestamp}_{content_hash}"
 
-    async def extract_entities_preview(self, text: str) -> List[Dict]:
+    async def extract_entities_preview(self, text: str) -> list[dict[str, Any]]:
         """
         Quick entity extraction preview without full processing.
 
@@ -245,49 +251,57 @@ class TextProcessor:
             List of potential entities found
         """
         # Simple regex-based entity detection for preview
-        entities = []
+        entities: list[dict[str, Any]] = []
 
         # Detect potential person names (capitalized words)
-        person_pattern = r'\b[A-Z][a-z]+ [A-Z][a-z]+\b'
+        person_pattern = r"\b[A-Z][a-z]+ [A-Z][a-z]+\b"
         for match in re.finditer(person_pattern, text):
-            entities.append({
-                'text': match.group(),
-                'type': 'Person',
-                'confidence': 0.7,
-                'start': match.start(),
-                'end': match.end()
-            })
+            entities.append(
+                {
+                    "text": match.group(),
+                    "type": "Person",
+                    "confidence": 0.7,
+                    "start": match.start(),
+                    "end": match.end(),
+                }
+            )
 
         # Detect potential organizations (words ending with common org suffixes)
-        org_pattern = r'\b[A-Z][a-zA-Z\s]*(Inc|Corp|LLC|Ltd|Company|Organization|Institute)\b'
+        org_pattern = (
+            r"\b[A-Z][a-zA-Z\s]*(Inc|Corp|LLC|Ltd|Company|Organization|Institute)\b"
+        )
         for match in re.finditer(org_pattern, text):
-            entities.append({
-                'text': match.group(),
-                'type': 'Organization',
-                'confidence': 0.8,
-                'start': match.start(),
-                'end': match.end()
-            })
+            entities.append(
+                {
+                    "text": match.group(),
+                    "type": "Organization",
+                    "confidence": 0.8,
+                    "start": match.start(),
+                    "end": match.end(),
+                }
+            )
 
         # Detect potential locations (capitalized words after location indicators)
-        location_pattern = r'\b(?:in|at|from|to)\s+([A-Z][a-zA-Z\s]+(?:City|State|Country|County|Province)?)\b'
+        location_pattern = r"\b(?:in|at|from|to)\s+([A-Z][a-zA-Z\s]+(?:City|State|Country|County|Province)?)\b"
         for match in re.finditer(location_pattern, text):
-            entities.append({
-                'text': match.group(1),
-                'type': 'Location',
-                'confidence': 0.6,
-                'start': match.start(1),
-                'end': match.end(1)
-            })
+            entities.append(
+                {
+                    "text": match.group(1),
+                    "type": "Location",
+                    "confidence": 0.6,
+                    "start": match.start(1),
+                    "end": match.end(1),
+                }
+            )
 
         return entities
 
-    async def get_processing_statistics(self) -> Dict:
+    async def get_processing_statistics(self) -> dict[str, Any]:
         """Get statistics about text processing performance."""
         return {
-            'supported_formats': list(self.supported_formats),
-            'batch_size': self.batch_size,
-            'status': 'active'
+            "supported_formats": list(self.supported_formats),
+            "batch_size": self.batch_size,
+            "status": "active",
         }
 
 
@@ -298,11 +312,14 @@ class DataPipelineManager:
     Handles various input types and coordinates with text processor.
     """
 
-    def __init__(self, text_processor: TextProcessor):
+    def __init__(self, text_processor: TextProcessor) -> None:
+        """Initialize the data pipeline manager."""
         self.text_processor = text_processor
-        self.supported_sources = ['file', 'url', 'api', 'user_input']
+        self.supported_sources = ["file", "url", "api", "user_input"]
 
-    async def ingest_from_source(self, source_type: str, source_config: Dict) -> Dict:
+    async def ingest_from_source(
+        self, source_type: str, source_config: dict[str, Any]
+    ) -> dict[str, Any]:
         """
         Ingest data from various sources.
 
@@ -316,18 +333,18 @@ class DataPipelineManager:
         if source_type not in self.supported_sources:
             raise ValueError(f"Unsupported source type: {source_type}")
 
-        if source_type == 'file':
-            return await self.text_processor.process_file(source_config['path'])
-        elif source_type == 'user_input':
+        if source_type == "file":
+            return await self.text_processor.process_file(source_config["path"])
+        if source_type == "user_input":
             return await self.text_processor.process_text(
-                text=source_config['text'],
-                source=source_config.get('source', 'user_input'),
-                metadata=source_config.get('metadata', {})
+                text=source_config["text"],
+                source=source_config.get("source", "user_input"),
+                metadata=source_config.get("metadata", {}),
             )
-        elif source_type == 'url':
+        if source_type == "url":
             # Placeholder for URL processing
             raise NotImplementedError("URL processing not yet implemented")
-        elif source_type == 'api':
+        if source_type == "api":
             # Placeholder for API processing
             raise NotImplementedError("API processing not yet implemented")
 

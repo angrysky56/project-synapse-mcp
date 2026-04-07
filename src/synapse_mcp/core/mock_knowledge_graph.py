@@ -7,13 +7,12 @@ Follows the servant-never-master principle with zero-setup requirements.
 
 from __future__ import annotations
 
-import asyncio
-import os
 from pathlib import Path
 from typing import Any
 
 try:
     import duckdb
+
     DUCKDB_AVAILABLE = True
 except ImportError:
     duckdb = None
@@ -79,7 +78,6 @@ class MockKnowledgeGraph:
                 properties JSON,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
-
             """CREATE TABLE IF NOT EXISTS relationships (
                 id VARCHAR PRIMARY KEY,
                 source_id VARCHAR,
@@ -90,7 +88,6 @@ class MockKnowledgeGraph:
                 properties JSON,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
-
             """CREATE TABLE IF NOT EXISTS facts (
                 id VARCHAR PRIMARY KEY,
                 content TEXT,
@@ -101,7 +98,6 @@ class MockKnowledgeGraph:
                 metadata JSON,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
-
             # Indexes for performance
             "CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name)",
             "CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type)",
@@ -119,11 +115,11 @@ class MockKnowledgeGraph:
     async def store_processed_data(self, data: dict) -> dict:
         """Store processed semantic data with graceful degradation."""
         stats = {
-            'entities_count': 0,
-            'relationships_count': 0,
-            'facts_count': 0,
-            'new_nodes': 0,
-            'new_edges': 0
+            "entities_count": 0,
+            "relationships_count": 0,
+            "facts_count": 0,
+            "new_nodes": 0,
+            "new_edges": 0,
         }
 
         try:
@@ -138,23 +134,23 @@ class MockKnowledgeGraph:
     async def _store_in_memory(self, data: dict, stats: dict) -> dict:
         """Fallback storage in memory."""
         # Store entities
-        for entity in data.get('entities', []):
-            self.entities[entity['id']] = entity
-            stats['entities_count'] += 1
-            stats['new_nodes'] += 1
+        for entity in data.get("entities", []):
+            self.entities[entity["id"]] = entity
+            stats["entities_count"] += 1
+            stats["new_nodes"] += 1
 
         # Store relationships
-        for rel in data.get('relationships', []):
+        for rel in data.get("relationships", []):
             rel_id = f"{rel['source_id']}_{rel['type']}_{rel['target_id']}"
-            rel['id'] = rel_id
+            rel["id"] = rel_id
             self.relationships.append(rel)
-            stats['relationships_count'] += 1
-            stats['new_edges'] += 1
+            stats["relationships_count"] += 1
+            stats["new_edges"] += 1
 
         # Store facts
-        for fact in data.get('facts', []):
-            self.facts[fact['id']] = fact
-            stats['facts_count'] += 1
+        for fact in data.get("facts", []):
+            self.facts[fact["id"]] = fact
+            stats["facts_count"] += 1
 
         logger.info(f"Stored in memory: {stats}")
         return stats
@@ -165,44 +161,66 @@ class MockKnowledgeGraph:
             return await self._store_in_memory(data, stats)
 
         # Store entities
-        for entity in data.get('entities', []):
-            self.conn.execute("""
+        for entity in data.get("entities", []):
+            self.conn.execute(
+                """
                 INSERT OR REPLACE INTO entities
                 (id, name, type, confidence, source, properties)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                entity['id'], entity['name'], entity['type'],
-                entity['confidence'], entity['source'], entity.get('properties', {})
-            ))
-            stats['entities_count'] += 1
-            stats['new_nodes'] += 1
+            """,
+                (
+                    entity["id"],
+                    entity["name"],
+                    entity["type"],
+                    entity["confidence"],
+                    entity["source"],
+                    entity.get("properties", {}),
+                ),
+            )
+            stats["entities_count"] += 1
+            stats["new_nodes"] += 1
 
         # Store relationships
-        for rel in data.get('relationships', []):
+        for rel in data.get("relationships", []):
             rel_id = f"{rel['source_id']}_{rel['type']}_{rel['target_id']}"
-            self.conn.execute("""
+            self.conn.execute(
+                """
                 INSERT OR REPLACE INTO relationships
                 (id, source_id, target_id, type, confidence, source, properties)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                rel_id, rel['source_id'], rel['target_id'], rel['type'],
-                rel['confidence'], rel['source'], rel.get('properties', {})
-            ))
-            stats['relationships_count'] += 1
-            stats['new_edges'] += 1
+            """,
+                (
+                    rel_id,
+                    rel["source_id"],
+                    rel["target_id"],
+                    rel["type"],
+                    rel["confidence"],
+                    rel["source"],
+                    rel.get("properties", {}),
+                ),
+            )
+            stats["relationships_count"] += 1
+            stats["new_edges"] += 1
 
         # Store facts
-        for fact in data.get('facts', []):
-            self.conn.execute("""
+        for fact in data.get("facts", []):
+            self.conn.execute(
+                """
                 INSERT OR REPLACE INTO facts
                 (id, content, logical_form, confidence, source, entities, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                fact['id'], fact['content'], fact.get('logical_form', ''),
-                fact['confidence'], fact['source'], fact.get('entities', []),
-                fact.get('metadata', {})
-            ))
-            stats['facts_count'] += 1
+            """,
+                (
+                    fact["id"],
+                    fact["content"],
+                    fact.get("logical_form", ""),
+                    fact["confidence"],
+                    fact["source"],
+                    fact.get("entities", []),
+                    fact.get("metadata", {}),
+                ),
+            )
+            stats["facts_count"] += 1
 
         logger.info(f"Stored in DuckDB: {stats}")
         return stats
@@ -221,23 +239,27 @@ class MockKnowledgeGraph:
 
         # Search facts
         for fact in self.facts.values():
-            if query_lower in fact['content'].lower():
-                results.append({
-                    'statement': fact['content'],
-                    'source': fact['source'],
-                    'confidence': fact['confidence'],
-                    'type': 'fact'
-                })
+            if query_lower in fact["content"].lower():
+                results.append(
+                    {
+                        "statement": fact["content"],
+                        "source": fact["source"],
+                        "confidence": fact["confidence"],
+                        "type": "fact",
+                    }
+                )
 
         # Search entities
         for entity in self.entities.values():
-            if query_lower in entity['name'].lower():
-                results.append({
-                    'statement': f"Entity: {entity['name']} ({entity['type']})",
-                    'source': entity['source'],
-                    'confidence': entity['confidence'],
-                    'type': 'entity'
-                })
+            if query_lower in entity["name"].lower():
+                results.append(
+                    {
+                        "statement": f"Entity: {entity['name']} ({entity['type']})",
+                        "source": entity["source"],
+                        "confidence": entity["confidence"],
+                        "type": "entity",
+                    }
+                )
 
         return results[:max_results]
 
@@ -249,37 +271,47 @@ class MockKnowledgeGraph:
         results = []
 
         # Search facts
-        fact_results = self.conn.execute("""
+        fact_results = self.conn.execute(
+            """
             SELECT content, source, confidence FROM facts
             WHERE content LIKE ?
             ORDER BY confidence DESC
             LIMIT ?
-        """, (f"%{query}%", max_results)).fetchall()
+        """,
+            (f"%{query}%", max_results),
+        ).fetchall()
 
         for row in fact_results:
-            results.append({
-                'statement': row[0],
-                'source': row[1],
-                'confidence': row[2],
-                'type': 'fact'
-            })
+            results.append(
+                {
+                    "statement": row[0],
+                    "source": row[1],
+                    "confidence": row[2],
+                    "type": "fact",
+                }
+            )
 
         # Search entities if space remains
         if len(results) < max_results:
-            entity_results = self.conn.execute("""
+            entity_results = self.conn.execute(
+                """
                 SELECT name, type, source, confidence FROM entities
                 WHERE name LIKE ?
                 ORDER BY confidence DESC
                 LIMIT ?
-            """, (f"%{query}%", max_results - len(results))).fetchall()
+            """,
+                (f"%{query}%", max_results - len(results)),
+            ).fetchall()
 
             for row in entity_results:
-                results.append({
-                    'statement': f"Entity: {row[0]} ({row[1]})",
-                    'source': row[2],
-                    'confidence': row[3],
-                    'type': 'entity'
-                })
+                results.append(
+                    {
+                        "statement": f"Entity: {row[0]} ({row[1]})",
+                        "source": row[2],
+                        "confidence": row[3],
+                        "type": "entity",
+                    }
+                )
 
         return results
 
@@ -287,32 +319,36 @@ class MockKnowledgeGraph:
         """Get knowledge base statistics."""
         if self.in_memory_fallback:
             return {
-                'entity_count': len(self.entities),
-                'relationship_count': len(self.relationships),
-                'fact_count': len(self.facts),
-                'density': 0.0,
-                'texts_processed': len(self.facts),
-                'processing_rate': 0.0,
-                'error_rate': 0.0,
-                'db_status': 'in_memory',
-                'memory_usage': 0.0,
-                'active_connections': 1
+                "entity_count": len(self.entities),
+                "relationship_count": len(self.relationships),
+                "fact_count": len(self.facts),
+                "density": 0.0,
+                "texts_processed": len(self.facts),
+                "processing_rate": 0.0,
+                "error_rate": 0.0,
+                "db_status": "in_memory",
+                "memory_usage": 0.0,
+                "active_connections": 1,
             }
 
         if not self.conn:
-            return {'error': 'No database connection'}
+            return {"error": "No database connection"}
 
         try:
-            entity_count = self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
-            relationship_count = self.conn.execute("SELECT COUNT(*) FROM relationships").fetchone()[0]
+            entity_count = self.conn.execute(
+                "SELECT COUNT(*) FROM entities"
+            ).fetchone()[0]
+            relationship_count = self.conn.execute(
+                "SELECT COUNT(*) FROM relationships"
+            ).fetchone()[0]
             fact_count = self.conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
 
             return {
-                'entity_count': entity_count,
-                'relationship_count': relationship_count,
-                'fact_count': fact_count,
-                'density': relationship_count / max(entity_count, 1),
-                'texts_processed': fact_count
+                "entity_count": entity_count,
+                "relationship_count": relationship_count,
+                "fact_count": fact_count,
+                "density": relationship_count / max(entity_count, 1),
+                "texts_processed": fact_count,
             }
         except Exception:
-            return {'error': 'Database query failed'}
+            return {"error": "Database query failed"}

@@ -11,6 +11,6 @@ This system transforms raw text into interconnected knowledge graphs
 and autonomously generates insights through pattern detection.
 """
 
-from .__about__ import __version__, __title__, __description__
+from .__about__ import __description__, __title__, __version__
 
 __all__ = ["__version__", "__title__", "__description__"]
