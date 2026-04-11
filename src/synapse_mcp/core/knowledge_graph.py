@@ -390,38 +390,119 @@ class KnowledgeGraph:
             return facts
 
     async def query_hybrid(self, query: str, max_results: int = 10) -> list[dict]:
-        """Hybrid search: vector ANN + fulltext BM25 keyword boost."""
+        """Hybrid search: Reciprocal Rank Fusion over vector ANN + fulltext BM25.
+
+        RRF combines ranked lists by position rather than score magnitude,
+        making it robust to the different scales of cosine similarity vs BM25.
+        Formula: rrf(d) = Σ 1/(k + rank(d)) across all result lists, k=60.
+        """
         if self.driver is None:
             raise RuntimeError("Driver not initialized.")
 
-        query_embedding = await self._embed_text(query)
+        K = 60  # Standard RRF constant — dampens high-rank advantage
 
-        # Get vector results
+        # --- Vector ANN results (ranked by cosine similarity) ---
         vec_results = await self.query_semantic(query, max_results * 2)
 
-        # Get fulltext BM25 results
+        # --- Fulltext BM25 results ---
         ft_query = """
         CALL db.index.fulltext.queryNodes('fact_fulltext', $query)
         YIELD node AS f, score AS ftScore
-        RETURN f.id AS id, f.content AS statement, f.source AS source,
+        RETURN f.content AS statement, f.source AS source,
                f.confidence AS confidence, ftScore
         LIMIT $limit
         """
         async with self.driver.session(database=self.database) as session:
             result = await session.run(ft_query, {
-                'query': query, 'limit': max_results,
+                'query': query, 'limit': max_results * 2,
             })
-            ft_hits: dict[str, float] = {}
+            ft_results: list[dict] = []
             async for record in result:
-                ft_hits[record['statement']] = record['ftScore']
+                ft_results.append({
+                    'statement': record['statement'],
+                    'source': record['source'],
+                    'confidence': record['confidence'],
+                    'bm25_score': record['ftScore'],
+                })
 
-        # Merge: boost vector results that also matched fulltext
-        for fact in vec_results:
-            ft_boost = ft_hits.get(fact['statement'], 0.0)
-            fact['hybrid_score'] = fact['similarity'] + (ft_boost * 0.1)
+        # --- RRF fusion ---
+        # Key by statement text; accumulate reciprocal rank scores from each list
+        fused: dict[str, dict] = {}
 
-        vec_results.sort(key=lambda x: x.get('hybrid_score', 0), reverse=True)
-        return vec_results[:max_results]
+        for rank, fact in enumerate(vec_results, start=1):
+            key = fact['statement']
+            if key not in fused:
+                fused[key] = {**fact, 'rrf_score': 0.0, 'in_vector': True}
+            fused[key]['rrf_score'] += 1.0 / (K + rank)
+
+        for rank, fact in enumerate(ft_results, start=1):
+            key = fact['statement']
+            if key not in fused:
+                fused[key] = {**fact, 'rrf_score': 0.0, 'in_bm25': True}
+            else:
+                fused[key]['in_bm25'] = True
+            fused[key]['rrf_score'] += 1.0 / (K + rank)
+
+        results = sorted(fused.values(), key=lambda x: x['rrf_score'], reverse=True)
+        return results[:max_results]
+
+    async def extract_query_entities(self, query: str) -> list[str]:
+        """Extract named entities from a query string using spaCy.
+
+        Returns a list of entity name strings to use as graph entry points
+        before the vector search runs.
+        """
+        try:
+            import spacy
+            # Reuse loaded model if available, else load small model
+            if not hasattr(self, '_nlp') or self._nlp is None:
+                self._nlp = spacy.load("en_core_web_sm")
+            doc = self._nlp(query)
+            return [ent.text for ent in doc.ents if len(ent.text.strip()) > 1]
+        except Exception as e:
+            logger.debug("Entity extraction skipped: %s", e)
+            return []
+
+    async def query_by_entities(self, entity_names: list[str], depth: int = 1) -> list[dict]:
+        """Seed graph traversal from named entities found in the query.
+
+        Finds matching Entity nodes by name (case-insensitive), then walks
+        their RELATES edges to surface directly connected facts. Returns
+        results shaped the same as query_semantic() for easy merging.
+        """
+        if self.driver is None or not entity_names:
+            return []
+
+        results: list[dict] = []
+        seen: set[str] = set()
+
+        cypher = """
+        MATCH (e:Entity)
+        WHERE toLower(e.name) = toLower($name)
+        OPTIONAL MATCH (e)-[:RELATES*1..$depth]-(neighbor:Entity)
+        OPTIONAL MATCH (f:Fact)-[:MENTIONS]->(e)
+        RETURN e.name AS entity, f.content AS statement,
+               f.source AS source, f.confidence AS confidence,
+               collect(DISTINCT neighbor.name)[..5] AS neighbors
+        LIMIT 20
+        """
+        async with self.driver.session(database=self.database) as session:
+            for name in entity_names:
+                result = await session.run(cypher, {'name': name, 'depth': depth})
+                async for record in result:
+                    stmt = record['statement']
+                    if stmt and stmt not in seen:
+                        seen.add(stmt)
+                        results.append({
+                            'statement': stmt,
+                            'source': record['source'],
+                            'confidence': record['confidence'],
+                            'similarity': 1.0,   # Exact entity match — treat as top signal
+                            'matched_entity': record['entity'],
+                            'entity_neighbors': record['neighbors'],
+                            'retrieval_path': 'entity_graph',
+                        })
+        return results
 
     async def explore_entity_connections(
         self, entity: str, depth: int = 2,

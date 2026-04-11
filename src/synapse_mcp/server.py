@@ -7,11 +7,16 @@ through the Model Context Protocol (MCP).
 
 import asyncio
 import atexit
+import re
+import shutil
 import signal
+import subprocess
 import sys
 import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -297,18 +302,50 @@ async def query_knowledge(
 
         synapse = ctx.request_context.lifespan_context["synapse"]
 
-        # First, check for relevant insights (Zettelkasten-first approach)
+        # --- Stage 1: Entity extraction → graph seed ---
+        # Extract named entities from query and pull directly connected facts.
+        # These are high-precision hits that bypass vector similarity entirely.
+        entity_facts: list[dict[str, Any]] = []
+        if synapse.knowledge_graph:
+            query_entities = await synapse.knowledge_graph.extract_query_entities(query)
+            if query_entities:
+                await ctx.info("Query entities found: %s", ", ".join(query_entities))
+                entity_facts = await synapse.knowledge_graph.query_by_entities(
+                    query_entities, depth=1
+                )
+
+        # --- Stage 2: Hybrid RRF retrieval (vector ANN + BM25) ---
+        facts = await synapse.knowledge_graph.query_hybrid(
+            query, max_results=max_results
+        )
+
+        # --- Stage 3: Wikilink graph expansion ---
+        # Find which wiki pages matched the search, then surface their wikilink
+        # neighbours as conceptually adjacent context.
+        wiki_context: list[str] = []
+        if synapse.wiki_adapter:
+            wiki_hits = await synapse.wiki_adapter.search_pages(query, subdir="wiki")
+            if wiki_hits:
+                hit_slugs = [h['name'] for h in wiki_hits[:3]]
+                neighbours = await synapse.wiki_adapter.get_wikilink_neighbors(hit_slugs)
+                linked: list[str] = []
+                for slug, links in neighbours.items():
+                    if links:
+                        linked.append(f"[[{slug}]] → " + ", ".join(f"[[{l}]]" for l in links[:4]))
+                wiki_context = linked
+
+        # --- Stage 4: Insights (Zettelkasten-first) ---
         insights: list[dict[str, Any]] = []
         if include_insights:
             insights = await synapse.insight_engine.search_insights(
                 query, max_results=max_results // 2
             )
 
-        # Then query for factual information
-        facts = await synapse.knowledge_graph.query_semantic(
-            query, max_results=max_results
-        )
+        # --- Merge entity hits to front of fact list ---
+        seen = {f['statement'] for f in facts}
+        merged_facts = list(entity_facts) + [f for f in facts if f['statement'] not in {e['statement'] for e in entity_facts}]
 
+        # --- Format output ---
         result_buffer = ["🔍 **Knowledge Query Results**\n\n"]
 
         if insights:
@@ -320,15 +357,24 @@ async def query_knowledge(
                     f"  *Evidence:* {len(insight['evidence'])} supporting facts\n\n"
                 )
 
-        if facts:
+        if merged_facts:
             result_buffer.append("**📊 Factual Information:**\n\n")
-            for fact in facts:
+            for fact in merged_facts[:max_results]:
+                path = fact.get('retrieval_path', 'hybrid')
+                score = fact.get('rrf_score') or fact.get('similarity', 0)
+                tag = f" `[{path}]`" if path == 'entity_graph' else ""
                 result_buffer.append(
-                    f"- {fact['statement']}\n"
-                    f"  *Source:* {fact['source']} | *Confidence:* {fact['confidence']:.2f}\n\n"
+                    f"- {fact['statement']}{tag}\n"
+                    f"  *Source:* {fact['source']} | *Score:* {score:.4f}\n\n"
                 )
 
-        if not insights and not facts:
+        if wiki_context:
+            result_buffer.append("**🔗 Related Wiki Pages:**\n\n")
+            for link_line in wiki_context:
+                result_buffer.append(f"- {link_line}\n")
+            result_buffer.append("\n")
+
+        if not insights and not merged_facts:
             result_buffer.append("No relevant information found in the knowledge base.")
 
         return "".join(result_buffer)
@@ -606,11 +652,27 @@ async def wiki_lint(ctx: Context) -> str:
             )
             for mf in report["missing_frontmatter"]:
                 lines.append(f"  - {mf}")
+        if report.get("non_reciprocal_links"):
+            lines.append(
+                f"**Non-reciprocal links** ({len(report['non_reciprocal_links'])}) "
+                f"— A links to B but B doesn't link back:"
+            )
+            for nr in report["non_reciprocal_links"]:
+                lines.append(f"  - [[{nr['source']}]] → [[{nr['missing_back_link']}]] (no return link)")
+        if report.get("non_preferred_tags"):
+            lines.append(
+                f"**Non-preferred tags** ({len(report['non_preferred_tags'])}) "
+                f"— use controlled vocabulary:"
+            )
+            for np_ in report["non_preferred_tags"]:
+                lines.append(f"  - {np_['page']}: `{np_['tag']}` → use `{np_['use_instead']}`")
         if not any(
             [
                 report["orphan_pages"],
                 report["broken_links"],
                 report["missing_frontmatter"],
+                report.get("non_reciprocal_links"),
+                report.get("non_preferred_tags"),
             ]
         ):
             lines.append("✅ All clear — no issues found.")
@@ -618,6 +680,77 @@ async def wiki_lint(ctx: Context) -> str:
         return "\n".join(lines)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("wiki_lint failed: %s", e)
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def wiki_hits_analysis(ctx: Context) -> str:
+    """Compute HITS hub and authority scores on the wiki wikilink graph.
+
+    Authorities = pages cited by many others — load-bearing knowledge nodes.
+    Hubs = pages that link to many good authorities — navigation layers.
+
+    Use to identify which pages need deepening (high authority) and which
+    need comprehensive link coverage (high hub).
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+        scores = await synapse.wiki_adapter.compute_wikilink_hits()
+        if not scores:
+            return "Not enough pages to compute HITS scores."
+
+        # Sort by authority desc for the top authorities table
+        by_auth = sorted(scores.items(), key=lambda x: x[1]["authority"], reverse=True)
+        by_hub = sorted(scores.items(), key=lambda x: x[1]["hub"], reverse=True)
+
+        lines = ["📊 **HITS Analysis — Wiki Wikilink Graph**\n"]
+        lines.append("**Top Authorities** (pages that should have the richest content):\n")
+        for slug, s in by_auth[:8]:
+            lines.append(f"  {s['authority']:.4f}  [[{slug}]]")
+        lines.append("\n**Top Hubs** (pages that should have comprehensive links):\n")
+        for slug, s in by_hub[:8]:
+            lines.append(f"  {s['hub']:.4f}  [[{slug}]]")
+        return "\n".join(lines)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_hits_analysis failed: %s", e)
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def wiki_cluster_pages(ctx: Context, n_clusters: int | None = None) -> str:
+    """Cluster wiki pages by semantic similarity using GAAC (TF-IDF).
+
+    Identifies:
+    - Natural topic clusters — pages that belong together
+    - Missing links — same-cluster pages with no wikilink between them
+    - Merge candidates — pages so similar they may be redundant (sim > 0.7)
+
+    Args:
+        n_clusters: Number of clusters (auto = sqrt of page count if omitted).
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+        result = await synapse.wiki_adapter.cluster_wiki_pages(n_clusters)
+
+        lines = ["🗂️ **Wiki Page Clusters (GAAC)**\n"]
+        for cluster in result["clusters"]:
+            lines.append(f"**Cluster {cluster['id']}:** " + ", ".join(f"[[{p}]]" for p in cluster["pages"]))
+            if cluster["missing_links"]:
+                for a, b in cluster["missing_links"]:
+                    lines.append(f"  ⚠️  Missing link: [[{a}]] ↔ [[{b}]]")
+        if result["merge_candidates"]:
+            lines.append("\n**Merge candidates** (similarity > 0.7):\n")
+            for a, b, sim in result["merge_candidates"]:
+                lines.append(f"  {sim:.3f}  [[{a}]] ↔ [[{b}]]")
+        else:
+            lines.append("\n✅ No high-similarity merge candidates found.")
+        return "\n".join(lines)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_cluster_pages failed: %s", e)
         return f"Error: {e}"
 
 
@@ -684,6 +817,11 @@ async def wiki_ingest_raw(
                 f"  Graph: {kg_result['new_nodes']} nodes, "
                 f"{kg_result['new_edges']} edges added"
             )
+
+        # Auto-move to Clippings/ so raw/ stays clean
+        move_result = await synapse.wiki_adapter.move_to_clippings(filename)
+        parts.append(f"  📁 {move_result}")
+
         parts.append(
             "\nNext: Use `wiki_write_page` to create a summary page in "
             "`wiki/sources/` and update relevant entity/concept pages."
@@ -691,6 +829,170 @@ async def wiki_ingest_raw(
         return "\n".join(parts)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("wiki_ingest_raw failed: %s", e)
+        return f"Error: {e}"
+
+
+def _find_node() -> str | None:
+    """Find the node executable, checking nvm directories if not on PATH."""
+    # Try system PATH first
+    node = shutil.which("node") or shutil.which("nodejs")
+    if node:
+        return node
+    # Search nvm versions (pick the most recent)
+    import os
+    nvm_dir = Path(os.path.expanduser("~/.nvm/versions/node"))
+    if nvm_dir.exists():
+        versions = sorted(nvm_dir.iterdir(), reverse=True)
+        for v in versions:
+            candidate = v / "bin" / "node"
+            if candidate.exists():
+                return str(candidate)
+    return None
+
+
+def _find_defuddle() -> str | None:
+    """Find the defuddle executable, checking nvm bin directories."""
+    import os
+    defuddle = shutil.which("defuddle")
+    if defuddle:
+        return defuddle
+    nvm_dir = Path(os.path.expanduser("~/.nvm/versions/node"))
+    if nvm_dir.exists():
+        versions = sorted(nvm_dir.iterdir(), reverse=True)
+        for v in versions:
+            candidate = v / "bin" / "defuddle"
+            if candidate.exists():
+                return str(candidate)
+    return None
+
+
+@mcp.tool()
+async def wiki_fetch_url(
+    ctx: Context,
+    url: str,
+    ingest: bool = True,
+) -> str:
+    """
+    Fetch a URL with defuddle (clean markdown extraction), save to raw/,
+    ingest into the knowledge graph, and archive to Clippings/.
+
+    Use this when researching the web — it strips navigation and clutter,
+    leaving only the article content. Much cleaner than raw web_fetch.
+
+    Args:
+        url: The URL to fetch and process.
+        ingest: If True (default), immediately ingest into Neo4j after saving.
+                Set False to save to raw/ only for manual review first.
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+
+        # Locate defuddle
+        defuddle_bin = _find_defuddle()
+        if not defuddle_bin:
+            node_bin = _find_node()
+            if not node_bin:
+                return (
+                    "defuddle not found. Install with: npm install -g defuddle\n"
+                    "(node also not found — install via nvm first)"
+                )
+            return (
+                "defuddle not found. Install with:\n"
+                f"  {node_bin.replace('/bin/node', '/bin/npm')} install -g defuddle"
+            )
+
+        # Run defuddle
+        result = subprocess.run(
+            [defuddle_bin, "parse", url, "--md"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return f"defuddle error: {result.stderr.strip()}"
+
+        content = result.stdout.strip()
+        if not content:
+            return f"defuddle returned empty content for: {url}"
+
+        # Also try to grab title for the filename slug
+        title_result = subprocess.run(
+            [defuddle_bin, "parse", url, "-p", "title"],
+            capture_output=True, text=True, timeout=10,
+        )
+        raw_title = title_result.stdout.strip() if title_result.returncode == 0 else ""
+
+        # Build slug from title or URL
+        if raw_title:
+            slug = re.sub(r"[^\w\s-]", "", raw_title.lower())
+            slug = re.sub(r"[\s_]+", "-", slug).strip("-")[:60]
+        else:
+            slug = re.sub(r"[^\w-]", "-", url.split("//")[-1])[:60].strip("-")
+
+        filename = f"{slug}.md"
+
+        # Build frontmatter + content
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        frontmatter = (
+            f"---\n"
+            f"title: {raw_title or slug}\n"
+            f"source: {url}\n"
+            f"created: {now}\n"
+            f"tags: [clippings]\n"
+            f"---\n\n"
+        )
+        full_content = frontmatter + content
+
+        # Write to raw/
+        raw_path = synapse.wiki_adapter.raw_dir / filename
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(full_content, encoding="utf-8")
+
+        if not ingest:
+            return (
+                f"✅ Saved to raw/{filename}\n"
+                f"   Source: {url}\n"
+                f"   Run wiki_ingest_raw('{filename}') when ready to process."
+            )
+
+        # Ingest immediately (same pipeline as wiki_ingest_raw)
+        raw_data = await synapse.wiki_adapter.read_page(f"raw/{filename}")
+        body = raw_data.get("body", "")
+
+        kg_result = None
+        if synapse.semantic_integrator and synapse.knowledge_graph:
+            processed = await synapse.semantic_integrator.process_text_with_semantics(
+                body, f"raw/{filename}", raw_data.get("metadata", {})
+            )
+            kg_result = await synapse.knowledge_graph.store_processed_data(processed)
+
+        summary = body[:200].replace("\n", " ") + "..."
+        await synapse.wiki_adapter.append_log(
+            f"fetch | {filename}",
+            f"Fetched {url} via defuddle → ingested.\n\nPreview: {summary}",
+        )
+
+        move_result = await synapse.wiki_adapter.move_to_clippings(filename)
+
+        parts = [f"✅ Fetched and ingested `{url}`"]
+        parts.append(f"   Saved as: {filename}")
+        if kg_result:
+            parts.append(
+                f"  Graph: {kg_result['new_nodes']} nodes, "
+                f"{kg_result['new_edges']} edges added"
+            )
+        parts.append(f"  📁 {move_result}")
+        parts.append(
+            "\nNext: Use `wiki_write_page` to create a summary page in `wiki/sources/`."
+        )
+        return "\n".join(parts)
+
+    except subprocess.TimeoutExpired:
+        return f"Timeout fetching {url} — site may be slow or blocking."
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_fetch_url failed: %s", e)
         return f"Error: {e}"
 
 

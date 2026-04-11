@@ -21,7 +21,9 @@ Code lives in its repo. Knowledge *about* the code lives here.
 ## Architecture
 
 ```
-Raw Sources (Obsidian vault / Clippings)
+Web / Raw Sources
+         │
+    [defuddle]          ← cleans web content before ingestion
          │
          ▼
 ┌──────────────────────┐     ┌─────────────────────┐
@@ -59,6 +61,11 @@ Raw Sources (Obsidian vault / Clippings)
 - Delta-sync manifest (content hashing) for efficient graph sync
 - Based on [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
 
+### Web Content Ingestion (defuddle)
+- `wiki_fetch_url` fetches any URL, strips navigation/ads/clutter via defuddle, ingests into Neo4j, and archives to `Clippings/` — one call, fully automated
+- `wiki_ingest_raw` auto-moves processed files from `raw/` to `Clippings/` — inbox stays clean
+- `raw/` is a true inbox: empty after every session
+
 ### Local-Only Embeddings (No Paid APIs)
 - **sentence-transformers** (default) — runs on GPU
 - **Ollama** (optional) — any local embedding model
@@ -67,11 +74,13 @@ Raw Sources (Obsidian vault / Clippings)
 ## Quick Start
 
 ### Prerequisites
+
 - Python 3.12+
 - [Neo4j 2026.x](https://neo4j.com/deployment-center/) (Community or Enterprise)
 - uv package manager (`pip install uv`)
 - [Obsidian](https://obsidian.md/) with the [Git community plugin](https://publish.obsidian.md/git-doc/Getting+Started)
 - A GitHub repo for the wiki vault (can be private)
+- Node.js + defuddle (for web content fetching — see below)
 
 ### Neo4j Setup
 ```bash
@@ -83,11 +92,30 @@ sudo systemctl enable neo4j
 sudo neo4j-admin set-initial-password your_password
 ```
 
+### defuddle Setup
+
+defuddle extracts clean markdown from web pages, stripping navigation, ads, and boilerplate before ingestion. Required for `wiki_fetch_url`.
+
+```bash
+# Install Node.js if not present (via nvm recommended)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+nvm install --lts
+nvm use --lts
+
+# Install defuddle globally
+npm install -g defuddle
+
+# Verify
+defuddle --version
+```
+
+> **Note:** Synapse finds defuddle automatically via nvm paths even if it's not on your shell's PATH. If `wiki_fetch_url` reports defuddle not found, ensure it's installed in an nvm-managed Node version.
+
 ### Obsidian Vault Setup
 1. Create a new vault in Obsidian (or clone your wiki repo)
 2. Install the **Git** community plugin (Settings → Community Plugins → Browse → "Git")
 3. Configure Git plugin with your GitHub credentials
-4. The vault structure (`raw/`, `wiki/`, `CLAUDE.md`) is created automatically by Synapse on first run
+4. The vault structure (`raw/`, `wiki/`, `Clippings/`, `AGENTS.md`) is created automatically by Synapse on first run
 
 ### Installation
 
@@ -154,13 +182,14 @@ Add to your MCP config:
 | `ingest_text` | Process text through semantic pipeline → Neo4j |
 | `query_knowledge` | Vector semantic search with insight-first results |
 | `explore_connections` | Graph traversal for hidden relationships |
-| `generate_insights` | Autonomous Zettelkasten pattern detection |
+| `generate_insights` | Autonomous Zettelkatten pattern detection |
 | `analyze_semantic_structure` | Montague Grammar semantic analysis |
 
 ### Wiki (LLM-WIKI)
 | Tool | Description |
 |---|---|
-| `wiki_ingest_raw` | Read raw source → Neo4j + wiki summary page |
+| `wiki_fetch_url` | Fetch URL → defuddle clean → ingest → archive to Clippings/ |
+| `wiki_ingest_raw` | Ingest file from raw/ → Neo4j + auto-move to Clippings/ |
 | `wiki_write_page` | Create/update wiki page with frontmatter |
 | `wiki_read_page` | Read a wiki page by path |
 | `wiki_search` | Keyword search across wiki pages |
@@ -172,23 +201,43 @@ Add to your MCP config:
 
 ```
 LLM-WIKI/
-├── CLAUDE.md           # Schema doc — wiki conventions and workflows
-├── raw/                # Immutable source documents
+├── AGENTS.md           # Agent schema doc — conventions and workflows
+├── raw/                # INBOX ONLY — unprocessed files; empty after each session
+├── raw-inbox.base      # Obsidian Base view of pending raw/ queue
+├── Clippings/          # Permanent archive — all processed sources land here
 ├── wiki/
 │   ├── index.md        # Auto-generated page catalogue
 │   ├── log.md          # Append-only activity log
 │   ├── entities/       # People, tools, projects
 │   ├── concepts/       # Ideas, theories, patterns
-│   └── sources/        # Summaries of ingested raw documents
-└── Clippings/          # Obsidian Web Clipper output
+│   └── sources/        # Summaries of ingested sources
 ```
+
+### Content Lifecycle
+
+```
+You clip/save → raw/          # your inbox
+     or
+Agent fetches → wiki_fetch_url # web research
+                    │
+              [defuddle clean]
+                    │
+              [semantic pipeline] → Neo4j
+                    │
+              wiki_write_page → wiki/sources/
+                    │
+              auto-move → Clippings/   # permanent archive
+```
+
+`raw/` is always empty after a session. `Clippings/` is the permanent record of everything that's been processed. Source pages in `wiki/sources/` reference the original URL, not the file path.
 
 ### Workflow
 
-1. **Ingest**: Drop source into `raw/`, call `wiki_ingest_raw` → Neo4j + wiki pages
-2. **Query**: `query_knowledge` (graph) or `wiki_search` (files) → synthesize answer
-3. **Lint**: `wiki_lint` → fix orphans, broken links, stale claims
-4. **Rollback**: Git handles version control via Obsidian Git plugin
+1. **Web research**: `wiki_fetch_url(url)` → fetches, cleans, ingests, archives in one call
+2. **Manual clip**: Drop into `raw/`, call `wiki_ingest_raw(filename)` → auto-archives after ingest
+3. **Query**: `query_knowledge` (graph) or `wiki_search` (files) → synthesize answer
+4. **Lint**: `wiki_lint` → fix orphans, broken links, stale claims
+5. **Rollback**: Git handles version control via Obsidian Git plugin
 
 ## Theoretical Foundation
 
