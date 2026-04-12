@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any
 
 import aiofiles  # type: ignore
+import networkx as nx
+import numpy as np
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from ..utils.logging_config import get_logger
 
@@ -241,7 +246,9 @@ class WikiAdapter:
 
         # Collect all outbound wikilinks and inbound counts
         link_re = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
-        heading_re = re.compile(r"^#{1,3}\s+(.+)", re.MULTILINE)
+        # Strip code fences and inline code before scanning for links
+        code_fence_re = re.compile(r"```.*?```", re.DOTALL)
+        inline_code_re = re.compile(r"`[^`]+`")
         inbound: dict[str, int] = {name: 0 for name in page_names}
         broken_links: list[dict[str, Any]] = []
         missing_frontmatter: list[str] = []
@@ -249,26 +256,23 @@ class WikiAdapter:
         outbound: dict[str, set[str]] = {}
 
         for pg in pages:
+            # Exclude log.md — it contains raw historical entries with wikilink
+            # text that are not real links, always producing false positives.
+            if pg["name"] in ("log", "index"):
+                continue
             data = await self.read_page(pg["path"])
             body = data.get("body", "")
+            # Strip code fences and inline code so examples don't register as links
+            body_clean = code_fence_re.sub("", body)
+            body_clean = inline_code_re.sub("", body_clean)
             meta = data.get("metadata", {})
             slug = pg["name"]
             if not meta:
                 missing_frontmatter.append(pg["path"])
 
-            # Find Connections section span for reciprocal scoping
-            connections_spans: list[tuple[int, int]] = []
-            headings = list(heading_re.finditer(body))
-            for i, m in enumerate(headings):
-                if "connection" in m.group(1).lower():
-                    end = headings[i + 1].start() if i + 1 < len(headings) else len(body)
-                    connections_spans.append((m.start(), end))
-
-            def _in_connections(pos: int) -> bool:
-                return any(s <= pos < e for s, e in connections_spans)
-
+            # Link properties
             outbound[slug] = set()
-            for match in link_re.finditer(body):
+            for match in link_re.finditer(body_clean):
                 target = match.group(1).strip()
                 norm_target = _normalize(target)
                 matched = False
@@ -367,8 +371,8 @@ class WikiAdapter:
                 weight = 1.0 if "connection" in heading_text else 0.5
                 section_weights.append((m.start(), end, weight))
 
-            def _weight_for_pos(pos: int) -> float:
-                for start, end, w in section_weights:
+            def _weight_for_pos(pos: int, weights: list[tuple[int, int, float]]) -> float:
+                for start, end, w in weights:
                     if start <= pos < end:
                         return w
                 return 0.5  # pre-first-heading prose
@@ -378,7 +382,7 @@ class WikiAdapter:
                 target = match.group(1).strip().lower().replace(" ", "-")
                 if not target or target == slug:
                     continue
-                w = _weight_for_pos(match.start())
+                w = _weight_for_pos(match.start(), section_weights)
                 # Keep highest weight if seen more than once
                 seen[target] = max(seen.get(target, 0.0), w)
 
@@ -395,11 +399,9 @@ class WikiAdapter:
         Returns:
             Dict mapping slug → {'hub': float, 'authority': float}
         """
-        import networkx as nx
-
         link_re = re.compile(r"\[\[([^\]|#]+)")
         pages = await self.list_pages("wiki")
-        G: nx.DiGraph = nx.DiGraph()
+        graph: nx.DiGraph = nx.DiGraph()
 
         for pg in pages:
             if pg["name"] in ("index", "log"):
@@ -407,27 +409,27 @@ class WikiAdapter:
             data = await self.read_page(pg["path"])
             body = data.get("body", "")
             slug = pg["name"]
-            G.add_node(slug)
+            graph.add_node(slug)
             for match in link_re.finditer(body):
                 target = match.group(1).strip().lower().replace(" ", "-")
                 if target and target != slug:
-                    G.add_edge(slug, target)
+                    graph.add_edge(slug, target)
 
-        if G.number_of_nodes() < 2:
+        if graph.number_of_nodes() < 2:
             return {}
 
         try:
-            hubs, authorities = nx.hits(G, max_iter=100, normalized=True)
+            hubs, authorities = nx.hits(graph, max_iter=100, normalized=True)
         except nx.PowerIterationFailedConvergence:
             # Fall back to in/out degree normalised
-            n = G.number_of_nodes()
-            authorities = {v: G.in_degree(v) / max(n - 1, 1) for v in G.nodes()}
-            hubs = {v: G.out_degree(v) / max(n - 1, 1) for v in G.nodes()}
+            n = graph.number_of_nodes()
+            authorities = {v: graph.in_degree(v) / max(n - 1, 1) for v in graph.nodes()}
+            hubs = {v: graph.out_degree(v) / max(n - 1, 1) for v in graph.nodes()}
 
         return {
             node: {"hub": round(hubs.get(node, 0.0), 4),
                    "authority": round(authorities.get(node, 0.0), 4)}
-            for node in G.nodes()
+            for node in graph.nodes()
         }
 
     async def _load_tag_taxonomy(self) -> dict[str, str]:
@@ -461,11 +463,6 @@ class WikiAdapter:
               'merge_candidates': [(slug_a, slug_b, similarity)],
             }
         """
-        from sklearn.cluster import AgglomerativeClustering
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import cosine_similarity
-        import numpy as np
-
         pages = await self.list_pages("wiki")
         pages = [p for p in pages if p["name"] not in ("index", "log")]
         if len(pages) < 3:
@@ -535,11 +532,11 @@ class WikiAdapter:
 
         # Find high-similarity pairs as merge candidates (sim > 0.7)
         merge_candidates = []
-        for i in range(len(slugs)):
+        for i, slug_a in enumerate(slugs):
             for j in range(i + 1, len(slugs)):
                 if sim_matrix[i, j] > 0.7:
                     merge_candidates.append(
-                        (slugs[i], slugs[j], round(float(sim_matrix[i, j]), 3))
+                        (slug_a, slugs[j], round(float(sim_matrix[i, j]), 3))
                     )
         merge_candidates.sort(key=lambda x: x[2], reverse=True)
 
@@ -549,36 +546,74 @@ class WikiAdapter:
     # File lifecycle
     # ------------------------------------------------------------------
 
-    async def move_to_clippings(self, filename: str) -> str:
-        """Move a processed raw file to Clippings/ archive.
+    def _infer_content_type(self, filename: str = "", source_url: str = "") -> str:
+        """Classify a source file into one of four archive types.
 
-        Called automatically after successful wiki_ingest_raw so that
-        raw/ stays clean as an inbox-only directory.
+        Routing logic (checked in order — first match wins):
+          papers       → academic publishers, preprint servers, DOIs
+          repositories → code hosting platforms
+          documentation→ official docs, specs, skills, READMEs
+          articles     → everything else (default)
+        """
+        url = source_url.lower()
+        name = filename.lower()
+
+        paper_signals = [
+            "arxiv.org", "doi.org", "pubmed", "sciencedirect.com",
+            "nature.com", "science.org", "acm.org", "ieee.org",
+            "springer.com", "wiley.com", "plos", "biorxiv", "medrxiv",
+            "ncbi.nlm.nih.gov", "semanticscholar.org", "sciadv",
+        ]
+        repo_signals = [
+            "github.com", "gitlab.com", "pypi.org", "npmjs.com",
+            "crates.io", "huggingface.co/", "bitbucket.org",
+        ]
+        doc_signals = [
+            "docs.", "/docs/", "help.", "/documentation/", "developer.",
+            "spec.", "standard", "niso", "ansi", "skill.md", "readme",
+            "publish.obsidian", "overleaf.com", "latex", "manual",
+        ]
+
+        if any(s in url for s in paper_signals) or name.endswith(".pdf"):
+            return "papers"
+        if any(s in url for s in repo_signals):
+            return "repositories"
+        if any(s in url or s in name for s in doc_signals):
+            return "documentation"
+        return "articles"
+
+    async def move_to_clippings(
+        self, filename: str, source_url: str = ""
+    ) -> str:
+        """Move a processed raw file into the typed Clippings archive.
+
+        Routes to  Clippings/<type>/<YYYY>/<filename>  so the archive
+        stays navigable as it grows. Type is inferred from source URL or
+        filename; year is always the current year.
 
         Args:
-            filename: Filename inside raw/ (not a full path).
-
-        Returns:
-            Status string.
+            filename:   Filename inside raw/ (not a full path).
+            source_url: Original URL of the source, used for type routing.
         """
         src = self.raw_dir / filename
-        clippings_dir = self.vault_path / "Clippings"
-        clippings_dir.mkdir(parents=True, exist_ok=True)
-        dest = clippings_dir / filename
-
         if not src.exists():
             return f"Source not found: raw/{filename}"
 
-        # Avoid clobbering existing Clippings file
+        content_type = self._infer_content_type(filename, source_url)
+        year = datetime.now(timezone.utc).strftime("%Y")
+        dest_dir = self.vault_path / "Clippings" / content_type / year
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
+
+        # Avoid clobbering an existing file
         if dest.exists():
-            stem = dest.stem
-            suffix = dest.suffix
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-            dest = clippings_dir / f"{stem}_{ts}{suffix}"
+            ts = datetime.now(timezone.utc).strftime("%H%M%S")
+            dest = dest_dir / f"{dest.stem}_{ts}{dest.suffix}"
 
         src.rename(dest)
-        logger.info("Moved raw/%s → Clippings/%s", filename, dest.name)
-        return f"Moved raw/{filename} → Clippings/{dest.name}"
+        rel = dest.relative_to(self.vault_path)
+        logger.info("Archived raw/%s → %s", filename, rel)
+        return f"Archived to Clippings/{content_type}/{year}/{dest.name}"
 
     # ------------------------------------------------------------------
     # Graph sync helpers

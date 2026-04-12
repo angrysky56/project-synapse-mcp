@@ -7,9 +7,12 @@ through the Model Context Protocol (MCP).
 
 import asyncio
 import atexit
+import os
 import re
 import shutil
 import signal
+
+# trunk-ignore(bandit/B404)
 import subprocess
 import sys
 import traceback
@@ -113,7 +116,7 @@ synapse_server = SynapseServer()
 
 
 @asynccontextmanager
-async def lifespan_context(mcp_app: FastMCP) -> AsyncIterator[dict[str, Any]]:
+async def lifespan_context(_mcp_app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server lifecycle with proper cleanup."""
     logger.info("Starting Project Synapse MCP server")
 
@@ -160,7 +163,7 @@ async def ingest_text(
     ctx: Context,
     text: str,
     source: str = "user_input",
-    metadata: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Ingest and process text into the knowledge graph using semantic analysis.
@@ -278,10 +281,7 @@ async def generate_insights(
 
 @mcp.tool()
 async def query_knowledge(
-    ctx: Context,
-    query: str,
-    include_insights: bool = True,
-    max_results: int = 10
+    ctx: Context, query: str, include_insights: bool = True, max_results: int = 10
 ) -> str:
     """
     Query the knowledge graph for facts and insights using natural language.
@@ -326,12 +326,15 @@ async def query_knowledge(
         if synapse.wiki_adapter:
             wiki_hits = await synapse.wiki_adapter.search_pages(query, subdir="wiki")
             if wiki_hits:
-                hit_slugs = [h['name'] for h in wiki_hits[:3]]
-                neighbours = await synapse.wiki_adapter.get_wikilink_neighbors(hit_slugs)
+                hit_slugs = [h["name"] for h in wiki_hits[:3]]
+                neighbours = await synapse.wiki_adapter.get_wikilink_neighbors(
+                    hit_slugs
+                )
                 linked: list[str] = []
-                for slug, links in neighbours.items():
-                    if links:
-                        linked.append(f"[[{slug}]] → " + ", ".join(f"[[{l}]]" for l in links[:4]))
+                for slug, links_list in neighbours.items():
+                    if links_list:
+                        linked_str = ", ".join(f"[[{link}]]" for link in links_list[:4])
+                        linked.append(f"[[{slug}]] → {linked_str}")
                 wiki_context = linked
 
         # --- Stage 4: Insights (Zettelkasten-first) ---
@@ -342,8 +345,10 @@ async def query_knowledge(
             )
 
         # --- Merge entity hits to front of fact list ---
-        seen = {f['statement'] for f in facts}
-        merged_facts = list(entity_facts) + [f for f in facts if f['statement'] not in {e['statement'] for e in entity_facts}]
+        entity_statements = {e["statement"] for e in entity_facts}
+        merged_facts = list(entity_facts) + [
+            f for f in facts if f["statement"] not in entity_statements
+        ]
 
         # --- Format output ---
         result_buffer = ["🔍 **Knowledge Query Results**\n\n"]
@@ -360,9 +365,9 @@ async def query_knowledge(
         if merged_facts:
             result_buffer.append("**📊 Factual Information:**\n\n")
             for fact in merged_facts[:max_results]:
-                path = fact.get('retrieval_path', 'hybrid')
-                score = fact.get('rrf_score') or fact.get('similarity', 0)
-                tag = f" `[{path}]`" if path == 'entity_graph' else ""
+                path = fact.get("retrieval_path", "hybrid")
+                score = fact.get("rrf_score") or fact.get("similarity", 0)
+                tag = f" `[{path}]`" if path == "entity_graph" else ""
                 result_buffer.append(
                     f"- {fact['statement']}{tag}\n"
                     f"  *Source:* {fact['source']} | *Score:* {score:.4f}\n\n"
@@ -386,10 +391,7 @@ async def query_knowledge(
 
 @mcp.tool()
 async def explore_connections(
-    ctx: Context,
-    entity: str,
-    depth: int = 2,
-    connection_types: list[str] | None = None
+    ctx: Context, entity: str, depth: int = 2, connection_types: list[str] | None = None
 ) -> str:
     """
     Explore connections and relationships around a specific entity in the knowledge graph.
@@ -432,7 +434,9 @@ async def explore_connections(
         for level in sorted(by_depth.keys()):
             result_buffer.append(f"**Level {level} Connections:**\n")
             for conn in by_depth[level]:
-                result_buffer.append(f"  • {conn['target_entity']} ({conn['relationship_type']})\n")
+                result_buffer.append(
+                    f"  • {conn['target_entity']} ({conn['relationship_type']})\n"
+                )
                 if conn.get("strength"):
                     result_buffer.append(f"    Strength: {conn['strength']:.2f}\n")
             result_buffer.append("\n")
@@ -442,7 +446,9 @@ async def explore_connections(
         if unexpected:
             result_buffer.append("🔍 **Unexpected Connections Discovered:**\n")
             for conn in unexpected:
-                result_buffer.append(f"  • {entity} → {conn['target_entity']} via {conn['path']}\n")
+                result_buffer.append(
+                    f"  • {entity} → {conn['target_entity']} via {conn['path']}\n"
+                )
 
         return "".join(result_buffer)
 
@@ -453,9 +459,7 @@ async def explore_connections(
 
 @mcp.tool()
 async def analyze_semantic_structure(
-    ctx: Context,
-    text: str,
-    include_logical_form: bool = False
+    ctx: Context, text: str, include_logical_form: bool = False
 ) -> str:
     """
     Analyze the semantic structure of text using Montague Grammar parsing.
@@ -479,7 +483,7 @@ async def analyze_semantic_structure(
 
         result_buffer = [
             "🧮 **Semantic Structure Analysis**\n\n",
-            f"**Input Text:** {text}\n\n"
+            f"**Input Text:** {text}\n\n",
         ]
 
         if analysis.get("entities"):
@@ -658,14 +662,19 @@ async def wiki_lint(ctx: Context) -> str:
                 f"— A links to B but B doesn't link back:"
             )
             for nr in report["non_reciprocal_links"]:
-                lines.append(f"  - [[{nr['source']}]] → [[{nr['missing_back_link']}]] (no return link)")
+                lines.append(
+                    f"  - [[{nr['source']}]] → [[{nr['missing_back_link']}]] "
+                    "(no return link)"
+                )
         if report.get("non_preferred_tags"):
             lines.append(
                 f"**Non-preferred tags** ({len(report['non_preferred_tags'])}) "
                 f"— use controlled vocabulary:"
             )
             for np_ in report["non_preferred_tags"]:
-                lines.append(f"  - {np_['page']}: `{np_['tag']}` → use `{np_['use_instead']}`")
+                lines.append(
+                    f"  - {np_['page']}: `{np_['tag']}` → use `{np_['use_instead']}`"
+                )
         if not any(
             [
                 report["orphan_pages"],
@@ -706,7 +715,9 @@ async def wiki_hits_analysis(ctx: Context) -> str:
         by_hub = sorted(scores.items(), key=lambda x: x[1]["hub"], reverse=True)
 
         lines = ["📊 **HITS Analysis — Wiki Wikilink Graph**\n"]
-        lines.append("**Top Authorities** (pages that should have the richest content):\n")
+        lines.append(
+            "**Top Authorities** (pages that should have the richest content):\n"
+        )
         for slug, s in by_auth[:8]:
             lines.append(f"  {s['authority']:.4f}  [[{slug}]]")
         lines.append("\n**Top Hubs** (pages that should have comprehensive links):\n")
@@ -738,7 +749,8 @@ async def wiki_cluster_pages(ctx: Context, n_clusters: int | None = None) -> str
 
         lines = ["🗂️ **Wiki Page Clusters (GAAC)**\n"]
         for cluster in result["clusters"]:
-            lines.append(f"**Cluster {cluster['id']}:** " + ", ".join(f"[[{p}]]" for p in cluster["pages"]))
+            cluster_pages = ", ".join(f"[[{p}]]" for p in cluster["pages"])
+            lines.append(f"**Cluster {cluster['id']}:** {cluster_pages}")
             if cluster["missing_links"]:
                 for a, b in cluster["missing_links"]:
                     lines.append(f"  ⚠️  Missing link: [[{a}]] ↔ [[{b}]]")
@@ -818,8 +830,9 @@ async def wiki_ingest_raw(
                 f"{kg_result['new_edges']} edges added"
             )
 
-        # Auto-move to Clippings/ so raw/ stays clean
-        move_result = await synapse.wiki_adapter.move_to_clippings(filename)
+        # Auto-move to typed Clippings/ archive
+        source_url = raw_data.get("metadata", {}).get("source", "")
+        move_result = await synapse.wiki_adapter.move_to_clippings(filename, source_url)
         parts.append(f"  📁 {move_result}")
 
         parts.append(
@@ -839,7 +852,6 @@ def _find_node() -> str | None:
     if node:
         return node
     # Search nvm versions (pick the most recent)
-    import os
     nvm_dir = Path(os.path.expanduser("~/.nvm/versions/node"))
     if nvm_dir.exists():
         versions = sorted(nvm_dir.iterdir(), reverse=True)
@@ -852,7 +864,6 @@ def _find_node() -> str | None:
 
 def _find_defuddle() -> str | None:
     """Find the defuddle executable, checking nvm bin directories."""
-    import os
     defuddle = shutil.which("defuddle")
     if defuddle:
         return defuddle
@@ -904,11 +915,12 @@ async def wiki_fetch_url(
             )
 
         # Run defuddle
-        result = subprocess.run(
+        result = subprocess.run(  # nosec
             [defuddle_bin, "parse", url, "--md"],
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
         if result.returncode != 0:
             return f"defuddle error: {result.stderr.strip()}"
@@ -918,9 +930,12 @@ async def wiki_fetch_url(
             return f"defuddle returned empty content for: {url}"
 
         # Also try to grab title for the filename slug
-        title_result = subprocess.run(
+        title_result = subprocess.run(  # nosec
             [defuddle_bin, "parse", url, "-p", "title"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
         raw_title = title_result.stdout.strip() if title_result.returncode == 0 else ""
 
@@ -974,7 +989,7 @@ async def wiki_fetch_url(
             f"Fetched {url} via defuddle → ingested.\n\nPreview: {summary}",
         )
 
-        move_result = await synapse.wiki_adapter.move_to_clippings(filename)
+        move_result = await synapse.wiki_adapter.move_to_clippings(filename, url)
 
         parts = [f"✅ Fetched and ingested `{url}`"]
         parts.append(f"   Saved as: {filename}")
@@ -1167,7 +1182,7 @@ def semantic_analysis_prompt(text: str) -> list[base.Message]:
         base.UserMessage(
             content=(
                 f"Perform a comprehensive semantic analysis of the following "
-                f"text using Montague Grammar principles:\n\n\"{text}\"\n\n"
+                f'text using Montague Grammar principles:\n\n"{text}"\n\n'
                 "Please analyze:\n"
                 "1. Logical structure and compositional semantics\n"
                 "2. Entity-relationship extraction\n"
@@ -1220,7 +1235,8 @@ Evaluation criteria:
 5. **Potential Biases**: What biases might affect this insight?
 6. **Falsifiability**: How could this insight be tested or challenged?
 
-Provide a structured assessment with a recommended confidence score and suggestions for strengthening the insight if needed."""
+Provide a structured assessment with a recommended confidence score and suggestions
+for strengthening the insight if needed."""
 
 
 # =============================================================================
@@ -1239,7 +1255,7 @@ def cleanup_processes() -> None:
         logger.error("Error during cleanup: %s", e)
 
 
-def signal_handler(signum: int, frame: Any) -> None:
+def signal_handler(signum: int, _frame: Any) -> None:
     """Handle shutdown signals gracefully."""
     logger.info("Received signal %s, shutting down gracefully", signum)
     cleanup_processes()
