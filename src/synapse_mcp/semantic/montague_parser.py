@@ -6,7 +6,10 @@ formal semantic analysis and logical form generation for natural language.
 """
 
 import re
+
+# trunk-ignore(bandit/B404)
 import subprocess
+import sys
 from typing import Any
 
 import spacy  # type: ignore[import-untyped]
@@ -29,8 +32,15 @@ class MontagueParser:
     def __init__(self) -> None:
         self.nlp: Language | None = None
         self.entity_types = {
-            'PERSON', 'ORG', 'GPE', 'LOC', 'PRODUCT',
-            'EVENT', 'WORK_OF_ART', 'LAW', 'LANGUAGE'
+            "PERSON",
+            "ORG",
+            "GPE",
+            "LOC",
+            "PRODUCT",
+            "EVENT",
+            "WORK_OF_ART",
+            "LAW",
+            "LANGUAGE",
         }
 
     async def initialize(self) -> None:
@@ -43,7 +53,10 @@ class MontagueParser:
         except OSError:
             logger.warning("spaCy model not found, downloading...")
             # In production, this should be handled during setup
-            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True)
+            # trunk-ignore(bandit/B603)
+            subprocess.run(
+                [sys.executable, "-m", "spacy", "download", "en_core_web_sm"], check=True
+            )
             self.nlp = spacy.load("en_core_web_sm")
             logger.info("Downloaded and loaded spaCy model")
 
@@ -95,15 +108,17 @@ class MontagueParser:
             # Calculate confidence based on entity characteristics
             confidence = self._calculate_entity_confidence(ent)
 
-            entities.append({
-                "text": ent.text,
-                "label": ent.label_,
-                "type": self._normalize_entity_type(ent.label_),
-                "start": ent.start_char,
-                "end": ent.end_char,
-                "confidence": confidence,
-                "id": self._generate_entity_id(ent.text, ent.label_),
-            })
+            entities.append(
+                {
+                    "text": ent.text,
+                    "label": ent.label_,
+                    "type": self._normalize_entity_type(ent.label_),
+                    "start": ent.start_char,
+                    "end": ent.end_char,
+                    "confidence": confidence,
+                    "id": self._generate_entity_id(ent.text, ent.label_),
+                }
+            )
 
         return entities
 
@@ -141,13 +156,15 @@ class MontagueParser:
                             break
 
                 if subject and obj:
-                    relations.append({
-                        "subject": subject,
-                        "predicate": predicate,
-                        "object": obj,
-                        "confidence": 0.8,
-                        "source_span": f"{token.i}-{head.i}",
-                    })
+                    relations.append(
+                        {
+                            "subject": subject,
+                            "predicate": predicate,
+                            "object": obj,
+                            "confidence": 0.8,
+                            "source_span": f"{token.i}-{head.i}",
+                        }
+                    )
 
         # Strategy 2: Copula/Linking verb patterns (is, are, becomes, equals)
         for token in doc:
@@ -171,13 +188,15 @@ class MontagueParser:
                         break
 
                 if cop_subject and cop_obj:
-                    relations.append({
-                        "subject": cop_subject,
-                        "predicate": f"is-{token.lemma_}",
-                        "object": cop_obj,
-                        "confidence": 0.75,
-                        "source_span": f"{token.i}",
-                    })
+                    relations.append(
+                        {
+                            "subject": cop_subject,
+                            "predicate": f"is-{token.lemma_}",
+                            "object": cop_obj,
+                            "confidence": 0.75,
+                            "source_span": f"{token.i}",
+                        }
+                    )
 
         # Strategy 3: Prepositional relationships
         for token in doc:
@@ -197,20 +216,22 @@ class MontagueParser:
                         break
 
                 if subject and obj:
-                    relations.append({
-                        "subject": subject,
-                        "predicate": f"relates-via-{token.text}",
-                        "object": obj,
-                        "confidence": 0.7,
-                        "source_span": f"{token.head.i}-{token.i}",
-                    })
+                    relations.append(
+                        {
+                            "subject": subject,
+                            "predicate": f"relates-via-{token.text}",
+                            "object": obj,
+                            "confidence": 0.7,
+                            "source_span": f"{token.head.i}-{token.i}",
+                        }
+                    )
 
         # Strategy 4: Compound and possessive patterns
         for token in doc:
-            if (
-                token.dep_ in ["compound", "poss"]
-                and token.head.pos_ in ["NOUN", "PROPN"]
-            ):
+            if token.dep_ in ["compound", "poss"] and token.head.pos_ in [
+                "NOUN",
+                "PROPN",
+            ]:
                 subject = token.text
                 obj = token.head.text
 
@@ -218,13 +239,15 @@ class MontagueParser:
                     relation_type = (
                         "modifies" if token.dep_ == "compound" else "possesses"
                     )
-                    relations.append({
-                        "subject": subject,
-                        "predicate": relation_type,
-                        "object": obj,
-                        "confidence": 0.65,
-                        "source_span": f"{token.i}-{token.head.i}",
-                    })
+                    relations.append(
+                        {
+                            "subject": subject,
+                            "predicate": relation_type,
+                            "object": obj,
+                            "confidence": 0.65,
+                            "source_span": f"{token.i}-{token.head.i}",
+                        }
+                    )
 
         return relations
 
@@ -287,7 +310,9 @@ class MontagueParser:
                         for ent in entities_in_sent
                     ],
                     "confidence": 0.9,  # High confidence for direct extraction
-                    "logical_form": await self._generate_logical_form_for_sentence(sent),
+                    "logical_form": await self._generate_logical_form_for_sentence(
+                        sent
+                    ),
                 }
                 propositions.append(proposition)
 
@@ -314,26 +339,26 @@ class MontagueParser:
     def _normalize_entity_type(self, spacy_label: str) -> str:
         """Normalize spaCy entity labels to our schema."""
         mapping = {
-            'PERSON': 'Person',
-            'ORG': 'Organization',
-            'GPE': 'Location',
-            'LOC': 'Location',
-            'PRODUCT': 'Product',
-            'EVENT': 'Event',
-            'WORK_OF_ART': 'CreativeWork',
-            'LAW': 'Law',
-            'LANGUAGE': 'Language',
-            'DATE': 'TemporalEntity',
-            'TIME': 'TemporalEntity',
-            'MONEY': 'MonetaryValue',
-            'QUANTITY': 'Quantity'
+            "PERSON": "Person",
+            "ORG": "Organization",
+            "GPE": "Location",
+            "LOC": "Location",
+            "PRODUCT": "Product",
+            "EVENT": "Event",
+            "WORK_OF_ART": "CreativeWork",
+            "LAW": "Law",
+            "LANGUAGE": "Language",
+            "DATE": "TemporalEntity",
+            "TIME": "TemporalEntity",
+            "MONEY": "MonetaryValue",
+            "QUANTITY": "Quantity",
         }
 
-        return mapping.get(spacy_label, 'Entity')
+        return mapping.get(spacy_label, "Entity")
 
     def _generate_entity_id(self, text: str, label: str) -> str:
         """Generate unique identifier for an entity."""
-        normalized = re.sub(r'[^a-zA-Z0-9]', '_', text.lower())
+        normalized = re.sub(r"[^a-zA-Z0-9]", "_", text.lower())
         return f"{label.lower()}_{normalized}"
 
     def _find_entity_for_token(self, doc: Doc, token: Token) -> str:
