@@ -41,6 +41,8 @@ class MontagueParser:
             "WORK_OF_ART",
             "LAW",
             "LANGUAGE",
+            "CONCEPT",
+            "METHOD",
         }
         self.logger = logger
 
@@ -113,11 +115,17 @@ class MontagueParser:
             # Calculate confidence based on entity characteristics
             confidence = self._calculate_entity_confidence(ent)
 
+            # Initial normalization
+            entity_type = self._normalize_entity_type(ent.label_)
+
+            # Refine type based on heuristics (Phase 3 upgrade)
+            entity_type = self._refine_entity_type(ent.text, entity_type)
+
             entities.append(
                 {
                     "text": ent.text,
                     "label": ent.label_,
-                    "type": self._normalize_entity_type(ent.label_),
+                    "type": entity_type,
                     "start": ent.start_char,
                     "end": ent.end_char,
                     "confidence": confidence,
@@ -359,9 +367,72 @@ class MontagueParser:
             "TIME": "TemporalEntity",
             "MONEY": "MonetaryValue",
             "QUANTITY": "Quantity",
+            "CONCEPT": "Concept",
+            "METHOD": "Method",
         }
 
         return mapping.get(spacy_label, "Entity")
+
+    @staticmethod
+    def _refine_entity_type(text: str, current_type: str) -> str:
+        """Refine entity type using heuristic rules for technical concepts."""
+        text_lower = text.lower()
+
+        # Keywords that strongly suggest a Concept or Method
+        concept_keywords = [
+            "learning",
+            "intelligence",
+            "principle",
+            "theory",
+            "model",
+            "network",
+            "forgetting",
+            "memory",
+            "consciousness",
+            "entropy",
+            "occupancy",
+            "neuroscience",
+            "architecture",
+            "framework",
+        ]
+        method_keywords = [
+            "algorithm",
+            "protocol",
+            "pipeline",
+            "procedure",
+            "technique",
+            "method",
+            "approach",
+            "search",
+            "indexing",
+            "retrieval",
+            "integration",
+            "refinement",
+            "optimization",
+        ]
+
+        # High-confidence Organizations often misidentified by NER
+        org_names = ["openai", "google", "anthropic", "meta", "microsoft", "deepmind"]
+
+        # Only refine types that are frequently misidentified for technical terms
+        if current_type in ["Organization", "Product", "Person", "Entity"]:
+            # 1. Check for high-confidence organizations
+            if any(org in text_lower for org in org_names):
+                return "Organization"
+
+            # 2. Check for technical Methods
+            if any(kw in text_lower for kw in method_keywords):
+                return "Method"
+
+            # 3. Check for technical Concepts
+            if any(kw in text_lower for kw in concept_keywords):
+                return "Concept"
+
+            # 4. Specific common AI acronyms/terms
+            if text_lower in ["llm", "rag", "cnn", "rnn", "transformer", "bert", "gpt"]:
+                return "Concept"
+
+        return current_type
 
     def _generate_entity_id(self, text: str, label: str) -> str:
         """Generate unique identifier for an entity."""

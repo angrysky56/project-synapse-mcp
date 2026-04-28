@@ -102,7 +102,7 @@ class SemanticIntegrator:
     ) -> dict[str, Any]:
         """Perform basic text processing and structure preparation."""
         # Clean and normalize text
-        cleaned_text = await self._clean_text(text)
+        cleaned_text = self._clean_text(text)
 
         # Split into sentences
         sentences = await self._split_sentences(cleaned_text)
@@ -324,14 +324,54 @@ class SemanticIntegrator:
                     }
                     processed_data["facts"].append(fact)
 
-    async def _clean_text(self, text: str) -> str:
-        """Clean and normalize text for processing."""
-        # Remove excessive whitespace
+    def _clean_text(self, text: str) -> str:
+        """
+        Clean and normalize text for processing.
+
+        Removes academic noise like LaTeX commands, HTML artifacts, and CID strings
+        that pollute the entity space during ingestion.
+        """
+        # 1. Remove HTML tags but keep content (basic stripping)
+        text = re.sub(r"</?[a-zA-Z][^>]*>", "", text)
+
+        # 2. Remove CID strings (PDF artifact)
+        text = re.sub(r"\(CID:\d+\)", "", text)
+
+        # 3. Remove LaTeX math environments
+        text = re.sub(r"\$\$.*?\$\$", " ", text, flags=re.DOTALL)
+        text = re.sub(r"\$[^$]+\$", " ", text)
+
+        # 4. Remove metadata-only LaTeX commands
+        text = re.sub(
+            r"\\(cite|ref|label|url|href|bibliographystyle|bibliography)\{.*?\}",
+            " ",
+            text,
+        )
+        text = re.sub(
+            r"\\(cite|ref|label|url|href|bibliographystyle|bibliography)", " ", text
+        )
+
+        # 5. Keep content of formatting LaTeX commands
+        text = re.sub(
+            r"\\(textbf|textit|emph|section|subsection|subsubsection)\{(.*?)\}",
+            r"\2",
+            text,
+        )
+
+        # 6. Remove remaining generic LaTeX commands
+        text = re.sub(r"\\[a-zA-Z]+\{.*?\}", " ", text)
+        text = re.sub(r"\\[a-zA-Z]+", " ", text)
+
+        # 7. Remove numeric citations like [1], [1, 2], [1-3]
+        text = re.sub(r"\[\d+(?:,\s*\d+|-\d+)*\]", " ", text)
+
+        # 8. Remove parenthetical citations like (Author, 2020)
+        text = re.sub(r"\([A-Z][a-z]+(?:\s+et\s+al\.)?,\s*\d{4}\)", " ", text)
+
+        # 9. Normalize whitespace and problematic characters
         text = re.sub(r"\s+", " ", text)
 
-        # Remove problematic characters with a simpler approach
         # Keep alphanumeric, spaces, and basic punctuation
-
         allowed_chars = (
             string.ascii_letters
             + string.digits
@@ -344,8 +384,11 @@ class SemanticIntegrator:
         text = re.sub(r"[\u201C\u201D]", '"', text)  # Smart double quotes
         text = re.sub(r"[\u2018\u2019]", "'", text)  # Smart single quotes
 
-        # Strip and ensure proper ending
+        # 10. Strip and ensure proper ending
         text = text.strip()
+        # Remove leading/trailing punctuation that might result from stripping noise
+        text = re.sub(r"^[.,!?;:-]+", "", text).strip()
+
         if text and text[-1] not in ".!?":
             text += "."
 

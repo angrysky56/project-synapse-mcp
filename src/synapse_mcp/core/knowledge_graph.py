@@ -454,7 +454,8 @@ class KnowledgeGraph:
 
     @logger.timer()
     async def query_hybrid(self, query: str, max_results: int = 10) -> list[dict]:
-        """Hybrid search: Reciprocal Rank Fusion over vector ANN + fulltext BM25.
+        """
+        Hybrid search: Reciprocal Rank Fusion over vector ANN + fulltext BM25 + graph traversal.
 
         RRF combines ranked lists by position rather than score magnitude,
         making it robust to the different scales of cosine similarity vs BM25.
@@ -464,11 +465,16 @@ class KnowledgeGraph:
             raise RuntimeError("Driver not initialized.")
 
         k = 60  # Standard RRF constant — dampens high-rank advantage
+        threshold = 0.01  # Minimum relevance score to include in results
 
-        # --- Vector ANN results (ranked by cosine similarity) ---
+        # 1. Seed graph traversal from named entities in query
+        query_entities = await self.extract_query_entities(query)
+        entity_results = await self.query_by_entities(query_entities, depth=1)
+
+        # 2. Vector ANN results (ranked by cosine similarity)
         vec_results = await self.query_semantic(query, max_results * 2)
 
-        # --- Fulltext BM25 results ---
+        # 3. Fulltext BM25 results
         ft_query = """
         CALL db.index.fulltext.queryNodes('fact_fulltext', $query)
         YIELD node AS f, score AS ftScore
@@ -495,25 +501,39 @@ class KnowledgeGraph:
                     }
                 )
 
-        # --- RRF fusion ---
+        # 4. RRF fusion
         # Key by statement text; accumulate reciprocal rank scores from each list
         fused: dict[str, dict] = {}
 
-        for rank, fact in enumerate(vec_results, start=1):
-            key = fact["statement"]
-            if key not in fused:
-                fused[key] = {**fact, "rrf_score": 0.0, "in_vector": True}
-            fused[key]["rrf_score"] += 1.0 / (k + rank)
+        # Helper to process result lists
+        def process_list(results: list[dict[str, Any]], source_name: str) -> None:
+            for rank, fact in enumerate(results, start=1):
+                key = fact["statement"]
+                if key not in fused:
+                    fused[key] = {
+                        **fact,
+                        "rrf_score": 0.0,
+                        "retrieval_sources": [source_name],
+                    }
+                else:
+                    if source_name not in fused[key]["retrieval_sources"]:
+                        fused[key]["retrieval_sources"].append(source_name)
+                fused[key]["rrf_score"] += 1.0 / (k + rank)
 
-        for rank, fact in enumerate(ft_results, start=1):
-            key = fact["statement"]
-            if key not in fused:
-                fused[key] = {**fact, "rrf_score": 0.0, "in_bm25": True}
-            else:
-                fused[key]["in_bm25"] = True
-            fused[key]["rrf_score"] += 1.0 / (k + rank)
+        process_list(entity_results, "entity_graph")
+        process_list(vec_results, "vector")
+        process_list(ft_results, "fulltext")
 
-        results = sorted(fused.values(), key=lambda x: x["rrf_score"], reverse=True)
+        # 5. Filter by threshold and sort
+        results = [r for r in fused.values() if r["rrf_score"] >= threshold]
+        results = sorted(results, key=lambda x: x["rrf_score"], reverse=True)
+
+        logger.debug(
+            "Hybrid search returned %d results (fused from %d candidates)",
+            len(results[:max_results]),
+            len(fused),
+        )
+
         return results[:max_results]
 
     async def extract_query_entities(self, query: str) -> list[str]:
@@ -550,10 +570,13 @@ class KnowledgeGraph:
         results: list[dict] = []
         seen: set[str] = set()
 
-        cypher = """
+        # Variable length path depth must be a literal in Cypher
+        depth_literal = min(max(int(depth), 1), 3)  # Sanitize: 1-3 range
+
+        cypher = f"""
         MATCH (e:Entity)
         WHERE toLower(e.name) = toLower($name)
-        OPTIONAL MATCH (e)-[:RELATES*1..$depth]-(neighbor:Entity)
+        OPTIONAL MATCH (e)-[:RELATES*1..{depth_literal}]-(neighbor:Entity)
         OPTIONAL MATCH (f:Fact)-[:MENTIONS]->(e)
         RETURN e.name AS entity, f.content AS statement,
                f.source AS source, f.confidence AS confidence,
@@ -562,7 +585,7 @@ class KnowledgeGraph:
         """
         async with self.driver.session(database=self.database) as session:
             for name in entity_names:
-                result = await session.run(cypher, {"name": name, "depth": depth})
+                result = await session.run(cypher, {"name": name})
                 async for record in result:
                     stmt = record["statement"]
                     if stmt and stmt not in seen:
