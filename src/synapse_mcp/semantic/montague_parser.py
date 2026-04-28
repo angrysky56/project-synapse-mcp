@@ -42,7 +42,9 @@ class MontagueParser:
             "LAW",
             "LANGUAGE",
         }
+        self.logger = logger
 
+    @logger.timer()
     async def initialize(self) -> None:
         """Initialize the semantic parser with spaCy models."""
         try:
@@ -55,7 +57,8 @@ class MontagueParser:
             # In production, this should be handled during setup
             # trunk-ignore(bandit/B603)
             subprocess.run(
-                [sys.executable, "-m", "spacy", "download", "en_core_web_sm"], check=True
+                [sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
+                check=True,
             )
             self.nlp = spacy.load("en_core_web_sm")
             logger.info("Downloaded and loaded spaCy model")
@@ -64,6 +67,7 @@ class MontagueParser:
             logger.error("Failed to initialize Montague parser: %s", e)
             raise
 
+    @logger.timer()
     async def parse_text(self, text: str) -> dict[str, Any]:
         """
         Parse text using Montague Grammar principles.
@@ -100,6 +104,7 @@ class MontagueParser:
 
         return analysis
 
+    @logger.timer()
     async def _extract_entities(self, doc: Doc) -> list[dict[str, Any]]:
         """Extract named entities with type and confidence information."""
         entities = []
@@ -122,6 +127,7 @@ class MontagueParser:
 
         return entities
 
+    @logger.timer()
     async def _extract_relations(self, doc: Doc) -> list[dict[str, Any]]:
         """Extract semantic relations between entities and key noun phrases."""
         relations = []
@@ -251,6 +257,7 @@ class MontagueParser:
 
         return relations
 
+    @logger.timer()
     async def _generate_logical_form(self, doc: Doc) -> str:
         """
         Generate logical form representation using lambda calculus.

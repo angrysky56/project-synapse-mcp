@@ -46,7 +46,9 @@ class KnowledgeGraph:
         self.database = os.getenv("NEO4J_DATABASE", "neo4j")
         self._local_embedder: Any = None  # lazy-loaded
         self._nlp: Any = None  # lazy-loaded for entity extraction
+        self.logger = logger
 
+    @logger.timer()
     async def connect(self) -> None:
         """Establish connection to Neo4j database."""
         try:
@@ -54,14 +56,27 @@ class KnowledgeGraph:
                 self.uri, auth=(self.user, self.password)
             )
             self.driver = driver
-            async with driver.session(database=self.database) as session:
-                result = await session.run("RETURN 1 as test")
-                await result.single()
+            await self.check_health()
             logger.info("Connected to Neo4j database")
             await self._initialize_schema()
         except Exception as e:
             logger.error(f"Failed to connect to Neo4j: {e}")
             raise
+
+    async def check_health(self) -> bool:
+        """Verify Neo4j connectivity and schema readiness."""
+        if not self.driver:
+            raise RuntimeError("Neo4j driver not initialized")
+        try:
+            async with self.driver.session(database=self.database) as session:
+                result = await session.run("RETURN 1 as test")
+                record = await result.single()
+                if not record or record["test"] != 1:
+                    raise RuntimeError("Neo4j health check failed: Invalid response")
+            return True
+        except Exception as e:
+            logger.error(f"Neo4j health check failed: {e}")
+            raise RuntimeError(f"Neo4j health check failed: {str(e)}") from e
 
     async def close(self) -> None:
         """Close database connection."""
@@ -73,6 +88,7 @@ class KnowledgeGraph:
     # Schema initialisation (Neo4j 2026.x)
     # ------------------------------------------------------------------
 
+    @logger.timer()
     async def _initialize_schema(self) -> None:
         """Create constraints, property indexes, vector indexes, and fulltext indexes."""
         if self.driver is None:
@@ -160,6 +176,7 @@ class KnowledgeGraph:
             logger.info(f"Loaded embedding model: {EMBEDDING_MODEL}")
         return self._local_embedder
 
+    @logger.timer()
     async def _embed_text(self, text: str) -> list[float]:
         """Generate embedding locally. Supports sentence-transformers or Ollama."""
         import asyncio
@@ -197,6 +214,7 @@ class KnowledgeGraph:
     # Store operations
     # ------------------------------------------------------------------
 
+    @logger.timer()
     async def store_processed_data(self, processed_data: dict) -> dict:
         """Store processed semantic data in the knowledge graph."""
         if self.driver is None:
@@ -399,6 +417,7 @@ class KnowledgeGraph:
     # Query: vector semantic search (replaces old CONTAINS matching)
     # ------------------------------------------------------------------
 
+    @logger.timer()
     async def query_semantic(self, query: str, max_results: int = 10) -> list[dict]:
         """ANN vector search over Facts using Neo4j vector index."""
         if self.driver is None:
@@ -433,6 +452,7 @@ class KnowledgeGraph:
                 )
             return facts
 
+    @logger.timer()
     async def query_hybrid(self, query: str, max_results: int = 10) -> list[dict]:
         """Hybrid search: Reciprocal Rank Fusion over vector ANN + fulltext BM25.
 
@@ -514,6 +534,7 @@ class KnowledgeGraph:
             logger.debug("Entity extraction skipped: %s", e)
             return []
 
+    @logger.timer()
     async def query_by_entities(
         self, entity_names: list[str], depth: int = 1
     ) -> list[dict]:
@@ -559,6 +580,7 @@ class KnowledgeGraph:
                         )
         return results
 
+    @logger.timer()
     async def explore_entity_connections(
         self,
         entity: str,
@@ -606,6 +628,7 @@ class KnowledgeGraph:
     # Statistics
     # ------------------------------------------------------------------
 
+    @logger.timer()
     async def get_statistics(self) -> dict:
         """Get current knowledge graph statistics."""
         queries = {
@@ -644,6 +667,7 @@ class KnowledgeGraph:
     # Insight (Zettel) storage
     # ------------------------------------------------------------------
 
+    @logger.timer()
     async def store_insight(self, insight: dict) -> str:
         """Store a generated insight (Zettel) with vector embedding."""
         embedding = await self._embed_text(insight["content"])
@@ -706,6 +730,7 @@ class KnowledgeGraph:
             },
         )
 
+    @logger.timer()
     async def get_insights_by_topic(self, topic: str) -> list[dict]:
         """Retrieve insights related to a topic using vector similarity."""
         if self.driver is None:

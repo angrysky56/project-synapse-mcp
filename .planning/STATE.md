@@ -5,34 +5,59 @@
 See: .planning/PROJECT.md (updated 2026-04-28)
 
 **Core value:** Building a rock-solid foundation for autonomous synthesis where knowledge compounds reliably.
-**Current focus:** Phase 1: Server Stability & Observability
+**Current focus:** Phase 2: Wiki Bridge Resilience (COMPLETED)
 
 ## Current Position
 
-Phase: 1 of 2 (Server Stability & Observability)
-Plan: Ready to plan
-Status: Ready to plan
-Last activity: 2026-04-28 — Initialized project planning structure
+Phase: 2 of 2 (Wiki Bridge Resilience Hardening)
+Plan: 
+- **01-01**: Positional arg fix & Test repair (COMPLETED)
+- **01-02**: Health checks & Error Handling (COMPLETED)
+- **01-03**: Standardize logging & Observability (COMPLETED)
+- **02-01**: Harden WikiAdapter I/O (COMPLETED)
+- **02-02**: Resilient Indexing (COMPLETED)
 
-Progress: [░░░░░░░░░░] 0%
+## Current Session Summary (2026-04-28)
+
+### Phase 2 Completion
+- **Hardened Wiki Bridge**: Refactored `WikiAdapter` for granular error handling and disk-level verification.
+- **Infrastructure Fix**: Resolved Neo4j fulltext index failures by switching to modern `CREATE FULLTEXT INDEX` syntax and correcting database context (switched from default `neo4j` to project-specific `synapse` database).
+- **Operation Verified**: Successfully ingested "Eidetic Learning" paper (211 nodes, 536 edges). Verified retrieval via `query_knowledge`.
+
+### Phase 3 Initiation: Semantic Retrieval & Graph Cleaning
+- **Objective**: Improve the quality of ingested data and the precision of the hybrid search.
+- **Key Discovery**: Academic paper ingestion introduces noise (LaTeX tags, CID-encoded strings) which pollutes the entity space.
+- **Next Task**: Implement a pre-processor to strip noise from markdown before semantic analysis.
+
+### System Health
+- **Neo4j**: UP (Database: `synapse`)
+- **Wiki Vault**: UP (`/home/ty/Documents/LLM-WIKI`)
+- **Fulltext Indexes**: ONLINE (`fact_fulltext`, `entity_fulltext`)
+- **Retrieval Pipeline**: OPERATIONAL (Hybrid RRF)
+
+### Continuity Notes
+- The server uses `.env` in the project root. Ensure all external scripts (e.g., for direct Cypher queries) use these credentials.
+- Fulltext query procedure `db.index.fulltext.queryNodes` is working now that indexes are correctly initialized in the `synapse` database.
+
+Progress: [▓▓▓▓▓▓▓▓▓▓] 100% (Hardening Phase Complete)
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: 0 min
-- Total execution time: 0.0 hours
+- Total plans completed: 5
+- Average duration: 25 min
+- Total execution time: 2 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1 | 0 | 0 | 0 |
-| 2 | 0 | 0 | 0 |
+| 1 | 3 | 75m | 25m |
+| 2 | 2 | 45m | 22.5m |
 
 **Recent Trend:**
-- Last 5 plans: N/A
-- Trend: Stable
+- Last 2 plans: 02-01, 02-02
+- Trend: Stable (Bridge reinforced)
 
 *Updated after each plan completion*
 
@@ -41,16 +66,18 @@ Progress: [░░░░░░░░░░] 0%
 ### Decisions
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
-- [Phase 0]: Focus on Hardening (Option A) due to critical bugs in tool logging.
+- [Phase 2]: Introduced custom exception hierarchy (`SynapseError` -> `WikiError`).
+- [Phase 2]: Implemented "deep" refresh mode for Wiki index.
+- [Phase 2]: Switched to resilient file listing (`sorted(target.rglob("*.md"))`) to avoid concurrent deletion crashes.
 
 ### Pending Todos
-None yet.
+- [ ] Implement markdown pre-processor for noise reduction.
 
 ### Blockers/Concerns
-- Broad error handling in `server.py` makes it difficult to pinpoint root causes without reading full tracebacks in logs.
+- None (Phase 3 objectives initiated).
 
 ## Session Continuity
 
-Last session: 2026-04-28 13:22
-Stopped at: Initialized GSD planning structure
-Resume file: None
+Last session: 2026-04-28 20:10
+Stopped at: Completed Phase 2 Hardening.
+Resume file: .planning/ROADMAP.md

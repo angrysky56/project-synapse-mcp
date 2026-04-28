@@ -53,6 +53,22 @@ class SynapseServer:
         self.semantic_integrator: SemanticIntegrator | None = None
         self.wiki_adapter: WikiAdapter | None = None
         self.background_tasks: set = set()
+        self.logger = logger
+
+    def set_context(self, ctx: Context) -> None:
+        """Propagate MCP context to all components for status updates."""
+        self.logger.set_context(ctx)
+        components = [
+            self.knowledge_graph,
+            self.wiki_adapter,
+            self.insight_engine,
+            self.text_processor,
+            self.semantic_integrator,
+            self.montague_parser,
+        ]
+        for comp in components:
+            if comp and hasattr(comp, "logger") and hasattr(comp.logger, "set_context"):
+                comp.logger.set_context(ctx)
 
     async def initialize(self) -> None:
         """Initialize all server components."""
@@ -86,11 +102,52 @@ class SynapseServer:
             self.wiki_adapter = WikiAdapter()
             await self.wiki_adapter.initialize()
 
+            # Final health check
+            await self.check_health()
             logger.info("All components initialized successfully")
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Failed to initialize server components: %s", e)
             raise
+
+    async def check_health(self) -> dict[str, Any]:
+        """Check health of all server components."""
+        health_status: dict[str, Any] = {
+            "status": "healthy",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "components": {},
+        }
+
+        # Knowledge Graph check
+        try:
+            if self.knowledge_graph:
+                await self.knowledge_graph.check_health()
+                health_status["components"]["knowledge_graph"] = "healthy"
+            else:
+                health_status["components"]["knowledge_graph"] = "not_initialized"
+                health_status["status"] = "unhealthy"
+        except Exception as e:
+            health_status["components"]["knowledge_graph"] = f"unhealthy: {str(e)}"
+            health_status["status"] = "unhealthy"
+
+        # Wiki Adapter check
+        try:
+            if self.wiki_adapter:
+                await self.wiki_adapter.check_health()
+                health_status["components"]["wiki_adapter"] = "healthy"
+            else:
+                health_status["components"]["wiki_adapter"] = "not_initialized"
+                health_status["status"] = "unhealthy"
+        except Exception as e:
+            health_status["components"]["wiki_adapter"] = f"unhealthy: {str(e)}"
+            health_status["status"] = "unhealthy"
+
+        if health_status["status"] == "unhealthy":
+            logger.error("Server health check failed: %s", health_status)
+        else:
+            logger.info("Server health check passed")
+
+        return health_status
 
     async def cleanup(self) -> None:
         """Clean up all server resources."""
@@ -154,8 +211,8 @@ async def debug_test() -> str:
         logger.info("Debug test tool called")
         return "✅ MCP server is working correctly!"
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Debug test failed: %s", e)
-        return f"❌ Debug test failed: {str(e)}"
+        logger.error("Debug test failed: %s", e, exc_info=True)
+        return f"❌ Debug test failed: {type(e).__name__}: {str(e)}"
 
 
 @mcp.tool()
@@ -183,10 +240,11 @@ async def ingest_text(
         Processing summary with entities and relationships extracted
     """
     try:
-        await ctx.info("Ingesting text from source: %s", source)
+        await ctx.info(f"Ingesting text from source: {source}")
         logger.info("Starting text ingestion: %s...", text[:50])
 
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         logger.info("Retrieved synapse server instance")
 
         # Process text through semantic pipeline
@@ -227,8 +285,8 @@ async def ingest_text(
         )
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Text ingestion failed: %s", e)
-        return f"Error during text ingestion: {str(e)}"
+        logger.error("Text ingestion failed: %s", e, exc_info=True)
+        return f"❌ Text ingestion failed [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.tool()
@@ -252,6 +310,7 @@ async def generate_insights(
         await ctx.info("Generating autonomous insights")
 
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
 
         insights = await synapse.insight_engine.generate_insights(
             topic=topic, confidence_threshold=confidence_threshold
@@ -271,12 +330,12 @@ async def generate_insights(
                 f"*Zettel ID:* {insight['zettel_id']}\n\n---\n\n"
             )
 
-        await ctx.info("Generated %d new insights", len(insights))
+        await ctx.info(f"Generated {len(insights)} new insights")
         return "".join(result_buffer)
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Insight generation failed: %s", e)
-        return f"Error during insight generation: {str(e)}"
+        logger.error("Insight generation failed: %s", e, exc_info=True)
+        return f"❌ Insight generation failed [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.tool()
@@ -298,9 +357,10 @@ async def query_knowledge(
         Query results with facts, insights, and reasoning trails
     """
     try:
-        await ctx.info("Processing knowledge query: %s...", query[:50])
+        await ctx.info(f"Processing knowledge query: {query[:50]}...")
 
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
 
         # --- Stage 1: Entity extraction → graph seed ---
         # Extract named entities from query and pull directly connected facts.
@@ -309,7 +369,7 @@ async def query_knowledge(
         if synapse.knowledge_graph:
             query_entities = await synapse.knowledge_graph.extract_query_entities(query)
             if query_entities:
-                await ctx.info("Query entities found: %s", ", ".join(query_entities))
+                await ctx.info(f"Query entities found: {', '.join(query_entities)}")
                 entity_facts = await synapse.knowledge_graph.query_by_entities(
                     query_entities, depth=1
                 )
@@ -385,8 +445,8 @@ async def query_knowledge(
         return "".join(result_buffer)
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Knowledge query failed: %s", e)
-        return f"Error during knowledge query: {str(e)}"
+        logger.error("Knowledge query failed: %s", e, exc_info=True)
+        return f"❌ Knowledge query failed [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.tool()
@@ -408,9 +468,10 @@ async def explore_connections(
         Visual representation of connections and discovered patterns
     """
     try:
-        await ctx.info("Exploring connections for entity: %s", entity)
+        await ctx.info(f"Exploring connections for entity: {entity}")
 
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
 
         connections = await synapse.knowledge_graph.explore_entity_connections(
             entity=entity,
@@ -453,8 +514,8 @@ async def explore_connections(
         return "".join(result_buffer)
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Connection exploration failed: %s", e)
-        return f"Error exploring connections: {str(e)}"
+        logger.error("Connection exploration failed: %s", e, exc_info=True)
+        return f"❌ Connection exploration failed [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.tool()
@@ -478,6 +539,7 @@ async def analyze_semantic_structure(
         await ctx.info("Performing semantic structure analysis")
 
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
 
         analysis = await synapse.montague_parser.parse_text(text)
 
@@ -535,6 +597,7 @@ async def wiki_list_pages(ctx: Context, subdir: str = "wiki") -> str:
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured. Set WIKI_VAULT_PATH."
         pages = await synapse.wiki_adapter.list_pages(subdir)
@@ -559,18 +622,17 @@ async def wiki_read_page(ctx: Context, path: str) -> str:
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
         data = await synapse.wiki_adapter.read_page(path)
-        if "error" in data:
-            return str(data["error"])
         meta: dict[str, Any] = data.get("metadata", {})
         body: str = data.get("body", "")
         header = "\n".join(f"  {k}: {v}" for k, v in meta.items())
         return f"**Metadata:**\n{header}\n\n**Content:**\n{body}"
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("wiki_read_page failed: %s", e)
-        return f"Error: {e}"
+        return f"❌ Error: {e}"
 
 
 @mcp.tool()
@@ -592,6 +654,7 @@ async def wiki_write_page(
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
         meta: dict[str, Any] = {}
@@ -616,6 +679,7 @@ async def wiki_search(ctx: Context, query: str) -> str:
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
         results = await synapse.wiki_adapter.search_pages(query)
@@ -626,8 +690,8 @@ async def wiki_search(ctx: Context, query: str) -> str:
             lines.append(f"- `{r['path']}`")
         return "\n".join(lines)
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("wiki_search failed: %s", e)
-        return f"Error: {e}"
+        logger.error("Wiki search failed: %s", e, exc_info=True)
+        return f"❌ Wiki search failed [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.tool()
@@ -638,6 +702,7 @@ async def wiki_lint(ctx: Context) -> str:
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
         report = await synapse.wiki_adapter.lint()
@@ -688,8 +753,8 @@ async def wiki_lint(ctx: Context) -> str:
         await synapse.wiki_adapter.append_log("lint", "\n".join(lines))
         return "\n".join(lines)
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("wiki_lint failed: %s", e)
-        return f"Error: {e}"
+        logger.error("Wiki lint failed: %s", e, exc_info=True)
+        return f"❌ Wiki lint failed [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.tool()
@@ -704,6 +769,7 @@ async def wiki_hits_analysis(ctx: Context) -> str:
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
         scores = await synapse.wiki_adapter.compute_wikilink_hits()
@@ -725,8 +791,8 @@ async def wiki_hits_analysis(ctx: Context) -> str:
             lines.append(f"  {s['hub']:.4f}  [[{slug}]]")
         return "\n".join(lines)
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("wiki_hits_analysis failed: %s", e)
-        return f"Error: {e}"
+        logger.error("Wiki HITS analysis failed: %s", e, exc_info=True)
+        return f"❌ Wiki HITS analysis failed [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.tool()
@@ -743,6 +809,7 @@ async def wiki_cluster_pages(ctx: Context, n_clusters: int | None = None) -> str
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
         result = await synapse.wiki_adapter.cluster_wiki_pages(n_clusters)
@@ -762,23 +829,28 @@ async def wiki_cluster_pages(ctx: Context, n_clusters: int | None = None) -> str
             lines.append("\n✅ No high-similarity merge candidates found.")
         return "\n".join(lines)
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("wiki_cluster_pages failed: %s", e)
-        return f"Error: {e}"
+        logger.error("Wiki clustering failed: %s", e, exc_info=True)
+        return f"❌ Wiki clustering failed [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.tool()
-async def wiki_update_index(ctx: Context) -> str:
-    """Rebuild the wiki index from all wiki pages."""
+async def wiki_update_index(ctx: Context, deep: bool = False) -> str:
+    """Rebuild the wiki index from all wiki pages.
+
+    Args:
+        deep: If True, performs a disk-level verification of all indexed files.
+    """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
-        result = await synapse.wiki_adapter.update_index()
+        result = await synapse.wiki_adapter.update_index(deep=deep)
         await synapse.wiki_adapter.append_log("index", result)
         return str(result)
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("wiki_update_index failed: %s", e)
-        return f"Error: {e}"
+        logger.error("Wiki index update failed: %s", e, exc_info=True)
+        return f"❌ Wiki index update failed [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.tool()
@@ -797,6 +869,7 @@ async def wiki_ingest_raw(
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
 
@@ -841,8 +914,8 @@ async def wiki_ingest_raw(
         )
         return "\n".join(parts)
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("wiki_ingest_raw failed: %s", e)
-        return f"Error: {e}"
+        logger.error("Wiki ingest raw failed: %s", e, exc_info=True)
+        return f"❌ Wiki ingest raw failed: {e}"
 
 
 def _find_node() -> str | None:
@@ -897,6 +970,7 @@ async def wiki_fetch_url(
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
 
@@ -1007,8 +1081,8 @@ async def wiki_fetch_url(
     except subprocess.TimeoutExpired:
         return f"Timeout fetching {url} — site may be slow or blocking."
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("wiki_fetch_url failed: %s", e)
-        return f"Error: {e}"
+        logger.error("Wiki fetch URL failed: %s", e, exc_info=True)
+        return f"❌ Wiki fetch URL failed [{type(e).__name__}]: {str(e)}"
 
 
 # =============================================================================
@@ -1070,8 +1144,8 @@ async def knowledge_statistics() -> str:
 """
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Failed to get knowledge statistics: %s", e)
-        return f"Error retrieving statistics: {str(e)}"
+        logger.error("Failed to get knowledge statistics: %s", e, exc_info=True)
+        return f"❌ Failed to get knowledge statistics [{type(e).__name__}]: {str(e)}"
 
 
 @mcp.resource("synapse://insights/{topic}")
@@ -1122,8 +1196,8 @@ Confidence: {insight['confidence']:.3f} | Created: {insight['created_at']}
         return str(result)
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Failed to retrieve topic insights: %s", e)
-        return f"Error retrieving insights for topic '{topic}': {str(e)}"
+        logger.error("Failed to retrieve topic insights: %s", e, exc_info=True)
+        return f"❌ Failed to retrieve topic insights [{type(e).__name__}]: {str(e)}"
 
 
 # =============================================================================

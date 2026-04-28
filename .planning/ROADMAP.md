@@ -4,8 +4,8 @@
 A two-phase hardening journey focused on fixing critical server-level bugs, improving error granularity, and ensuring the stability of the Obsidian-Wiki bridge.
 
 ## Phases
-- [ ] **Phase 1: Server Stability & Observability** - Fix `Context.info` bugs, refactor error handling, and enhance infrastructure health checks.
-- [ ] **Phase 2: Wiki Bridge Resilience** - Stabilize `WikiAdapter` against file system changes and improve indexing robustness.
+- [x] **Phase 1: Server Stability & Observability** - Fix `Context.info` bugs, refactor error handling, and enhance infrastructure health checks.
+- [x] **Phase 2: Wiki Bridge Resilience** - Stabilize `WikiAdapter` against file system changes and improve indexing robustness.
 
 ## Phase Details
 
@@ -20,11 +20,11 @@ A two-phase hardening journey focused on fixing critical server-level bugs, impr
 **Plans**: 3 plans
 
 Plans:
-- [ ] 01-01: Fix `Context.info` and audit logging usage across `server.py`.
-- [ ] 01-02: Refactor error handling in `server.py` and implement health checks.
-- [ ] 01-03: Implement stage-level tracing for the semantic pipeline.
+- [x] **01-01**: Fix broken logging in `generate_insights` and fix test imports.
+- [x] **01-02**: Implement `check_health()` for all components and granular error handling.
+- [x] **01-03**: Standardize logging and metrics (Prometheus/Grafana ready).
 
-### Phase 2: Wiki Bridge Resilience
+### Phase 2: Wiki Bridge Resilience [In Progress]
 **Goal**: Ensure the LLM-WIKI interface is resilient to manual user changes in the Obsidian vault.
 **Depends on**: Phase 1
 **Requirements**: [WIKI-01, WIKI-02]
@@ -34,12 +34,35 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: Harden `WikiAdapter` file I/O operations.
-- [ ] 02-02: Improve index management and orphan cleanup logic.
+- [x] 02-01: Harden `WikiAdapter` file I/O operations.
+- [x] 02-02: Improve index management and orphan cleanup logic.
 
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Server Stability | 0/3 | Not started | - |
-| 2. Wiki Bridge | 0/2 | Not started | - |
+| 1. Server Stability | 3/3 | Completed | 2026-04-28 |
+| 2. Wiki Bridge | 2/2 | Completed | 2026-04-28 |
+
+### Phase 3: Semantic Retrieval & Graph Cleaning
+**Goal**: Enhance the quality of the knowledge graph and improve the precision of semantic retrieval.
+**Depends on**: Phase 2
+**Requirements**: [SEM-01, SEM-02, SEM-03]
+**Success Criteria**:
+  1. `query_knowledge` uses a consistent, modern retrieval strategy across vector and fulltext.
+  2. Ingestion pipeline filters out LaTeX/PDF noise (e.g., `id="A6.T8..."`).
+  3. Entity resolution logic handles near-duplicate entities and type corrections.
+**Plans**: 3 plans
+
+Plans:
+- [ ] 03-01: Standardize hybrid search query logic (RRF optimization).
+- [ ] 03-02: Implement noise-filtering pre-processor for markdown ingestion.
+- [ ] 03-03: Create `wiki_resolve_entities` tool for graph maintenance.
+
+## Progress
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 1. Server Stability | 3/3 | Completed | 2026-04-28 |
+| 2. Wiki Bridge | 2/2 | Completed | 2026-04-28 |
+| 3. Semantic Retrieval | 0/3 | Planning | - |

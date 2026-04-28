@@ -35,7 +35,10 @@ class InsightEngine:
     and machine learning to identify non-obvious connections and generate insights.
     """
 
-    async def get_insights_by_topic(self, topic: str, max_results: int = 20) -> list[dict[str, Any]]:
+    @logger.timer()
+    async def get_insights_by_topic(
+        self, topic: str, max_results: int = 20
+    ) -> list[dict[str, Any]]:
         """
         Retrieve all insights related to a specific topic.
 
@@ -64,21 +67,22 @@ class InsightEngine:
         async with self.knowledge_graph.driver.session(
             database=self.knowledge_graph.database
         ) as session:
-            result = await session.run(query, {
-                'topic': topic.lower(),
-                'limit': max_results
-            })
+            result = await session.run(
+                query, {"topic": topic.lower(), "limit": max_results}
+            )
 
             async for record in result:
-                insights.append({
-                    'zettel_id': record['zettel_id'],
-                    'title': record['title'],
-                    'content': record['content'],
-                    'confidence': record['confidence'],
-                    'pattern_type': record['pattern_type'],
-                    'created_at': record['created_at'],
-                    'evidence': [e for e in record['evidence'] if e['fact_id']]
-                })
+                insights.append(
+                    {
+                        "zettel_id": record["zettel_id"],
+                        "title": record["title"],
+                        "content": record["content"],
+                        "confidence": record["confidence"],
+                        "pattern_type": record["pattern_type"],
+                        "created_at": record["created_at"],
+                        "evidence": [e for e in record["evidence"] if e["fact_id"]],
+                    }
+                )
 
         return insights
 
@@ -86,14 +90,18 @@ class InsightEngine:
         self.knowledge_graph = knowledge_graph
         self.montague_parser = montague_parser
         self.graph = nx.DiGraph()
-        self.vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
+        self.vectorizer = TfidfVectorizer(max_features=1000, stop_words="english")
         self.is_running = False
         self.processing_interval = 300  # 5 minutes
 
         # Insight generation settings
-        self.confidence_threshold = float(os.getenv('INSIGHT_CONFIDENCE_THRESHOLD', '0.8'))
-        self.link_threshold = float(os.getenv('LINK_THRESHOLD', '0.7'))
+        self.confidence_threshold = float(
+            os.getenv("INSIGHT_CONFIDENCE_THRESHOLD", "0.8")
+        )
+        self.link_threshold = float(os.getenv("LINK_THRESHOLD", "0.7"))
+        self.logger = logger
 
+    @logger.timer()
     async def initialize(self) -> None:
         """Initialize the insight engine."""
         try:
@@ -124,6 +132,7 @@ class InsightEngine:
                 logger.error("Error in autonomous processing: %s", e)
                 await asyncio.sleep(60)  # Wait before retrying
 
+    @logger.timer()
     async def _autonomous_processing_cycle(self) -> None:
         """Run one cycle of autonomous insight generation."""
         logger.debug("Running autonomous insight generation cycle")
@@ -138,7 +147,7 @@ class InsightEngine:
         for pattern in patterns:
             try:
                 insight = await self._generate_insight_from_pattern(pattern)
-                if insight and insight['confidence'] >= self.confidence_threshold:
+                if insight and insight["confidence"] >= self.confidence_threshold:
                     # Store insight in knowledge graph
                     zettel_id = await self.knowledge_graph.store_insight(insight)
                     logger.info("Generated new insight with Zettel ID: %s", zettel_id)
@@ -165,29 +174,30 @@ class InsightEngine:
 
                 edge_count = 0
                 async for record in result:
-                    source = record['source']
-                    target = record['target']
+                    source = record["source"]
+                    target = record["target"]
 
                     # Only add edge if both source and target are valid
                     if source is not None and target is not None:
                         self.graph.add_edge(
                             source,
                             target,
-                            rel_type=record['rel_type'] or 'RELATES',
-                            weight=record['confidence'] or 1.0
+                            rel_type=record["rel_type"] or "RELATES",
+                            weight=record["confidence"] or 1.0,
                         )
                         edge_count += 1
 
             logger.debug(
                 "Built analysis graph with %d nodes, %d edges",
                 self.graph.number_of_nodes(),
-                self.graph.number_of_edges()
+                self.graph.number_of_edges(),
             )
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Could not build analysis graph from knowledge base: %s", e)
             logger.debug("Starting with empty analysis graph")
 
+    @logger.timer()
     async def _detect_patterns(self) -> list[dict[str, Any]]:
         """Detect patterns in the knowledge graph using various algorithms."""
         patterns: list[dict[str, Any]] = []
@@ -227,6 +237,7 @@ class InsightEngine:
         logger.debug("Detected %d patterns", len(patterns))
         return patterns
 
+    @logger.timer()
     async def _detect_communities(self) -> list[dict[str, Any]]:
         """Detect communities/clusters in the graph."""
         try:
@@ -251,13 +262,15 @@ class InsightEngine:
 
                 for comm_id, nodes in communities.items():
                     if len(nodes) >= 3:  # Only consider meaningful communities
-                        patterns.append({
-                            'type': 'community',
-                            'pattern_id': f"community_{comm_id}",
-                            'nodes': nodes,
-                            'size': len(nodes),
-                            'confidence': 0.7
-                        })
+                        patterns.append(
+                            {
+                                "type": "community",
+                                "pattern_id": f"community_{comm_id}",
+                                "nodes": nodes,
+                                "size": len(nodes),
+                                "confidence": 0.7,
+                            }
+                        )
 
                 return patterns
             else:
@@ -267,13 +280,15 @@ class InsightEngine:
 
                 for i, component in enumerate(components):
                     if len(component) >= 3:
-                        patterns.append({
-                            'type': 'community',
-                            'pattern_id': f"component_{i}",
-                            'nodes': list(component),
-                            'size': len(component),
-                            'confidence': 0.6
-                        })
+                        patterns.append(
+                            {
+                                "type": "community",
+                                "pattern_id": f"component_{i}",
+                                "nodes": list(component),
+                                "size": len(component),
+                                "confidence": 0.6,
+                            }
+                        )
 
                 return patterns
 
@@ -281,6 +296,7 @@ class InsightEngine:
             logger.debug("Community detection failed: %s", e)
             return []
 
+    @logger.timer()
     async def _analyze_centrality(self) -> list[dict[str, Any]]:
         """Analyze node centrality to find important entities."""
         patterns: list[dict[str, Any]] = []
@@ -293,34 +309,42 @@ class InsightEngine:
             centralities: dict[str, dict[Any, float]] = {}
 
             try:
-                centralities['betweenness'] = nx.betweenness_centrality(self.graph)
+                centralities["betweenness"] = nx.betweenness_centrality(self.graph)
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug("Betweenness centrality failed: %s", e)
 
             try:
-                centralities['pagerank'] = nx.pagerank(self.graph)
+                centralities["pagerank"] = nx.pagerank(self.graph)
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug("PageRank centrality failed: %s", e)
 
             try:
-                centralities['eigenvector'] = nx.eigenvector_centrality_numpy(self.graph)
+                centralities["eigenvector"] = nx.eigenvector_centrality_numpy(
+                    self.graph
+                )
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug("Eigenvector centrality failed: %s", e)
 
             for measure_name, centrality_dict in centralities.items():
                 # Find top nodes for each centrality measure
-                top_nodes = sorted(centrality_dict.items(), key=lambda x: x[1], reverse=True)[:5]
+                top_nodes = sorted(
+                    centrality_dict.items(), key=lambda x: x[1], reverse=True
+                )[:5]
 
                 for node, score in top_nodes:
                     if score > 0.1:  # Threshold for significance
-                        patterns.append({
-                            'type': 'centrality',
-                            'pattern_id': f"{measure_name}_{node}",
-                            'central_node': node,
-                            'centrality_type': measure_name,
-                            'score': score,
-                            'confidence': min(score * 2, 1.0)  # Scale to confidence
-                        })
+                        patterns.append(
+                            {
+                                "type": "centrality",
+                                "pattern_id": f"{measure_name}_{node}",
+                                "central_node": node,
+                                "centrality_type": measure_name,
+                                "score": score,
+                                "confidence": min(
+                                    score * 2, 1.0
+                                ),  # Scale to confidence
+                            }
+                        )
 
             return patterns
 
@@ -328,6 +352,7 @@ class InsightEngine:
             logger.debug(f"Centrality analysis failed: {e}")
             return []
 
+    @logger.timer()
     async def _find_interesting_paths(self) -> list[dict[str, Any]]:
         """Find interesting paths between entities."""
         patterns: list[dict[str, Any]] = []
@@ -353,15 +378,18 @@ class InsightEngine:
 
                         # Consider paths of length 3-5 as interesting
                         if 3 <= len(path) <= 5:
-                            patterns.append({
-                                'type': 'path',
-                                'pattern_id': f"path_{source}_{target}",
-                                'path': path,
-                                'length': len(path),
-                                'source': source,
-                                'target': target,
-                                'confidence': 1.0 / len(path)  # Shorter paths = higher confidence
-                            })
+                            patterns.append(
+                                {
+                                    "type": "path",
+                                    "pattern_id": f"path_{source}_{target}",
+                                    "path": path,
+                                    "length": len(path),
+                                    "source": source,
+                                    "target": target,
+                                    "confidence": 1.0
+                                    / len(path),  # Shorter paths = higher confidence
+                                }
+                            )
                 except nx.NetworkXNoPath:
                     continue
 
@@ -371,6 +399,7 @@ class InsightEngine:
             logger.error(f"Path analysis failed: {e}")
             return []
 
+    @logger.timer()
     async def _cluster_by_semantics(self) -> list[dict[str, Any]]:
         """Cluster entities based on semantic similarity."""
         patterns: list[dict[str, Any]] = []
@@ -393,8 +422,8 @@ class InsightEngine:
                 result = await session.run(query)
 
                 async for record in result:
-                    entity_id = record['entity_id']
-                    description = record['description']
+                    entity_id = record["entity_id"]
+                    description = record["description"]
 
                     # Only add entities with valid descriptions
                     is_valid = (
@@ -410,7 +439,7 @@ class InsightEngine:
             if len(descriptions) < 3:
                 logger.debug(
                     "Not enough entities with descriptions for clustering: %d",
-                    len(descriptions)
+                    len(descriptions),
                 )
                 return patterns
 
@@ -440,13 +469,15 @@ class InsightEngine:
                         # Filter out any None values from cluster_entities
                         valid_entities = [e for e in cluster_entities if e is not None]
                         if valid_entities:
-                            patterns.append({
-                                'type': 'semantic_cluster',
-                                'pattern_id': f"semantic_cluster_{cluster_id}",
-                                'entities': valid_entities,
-                                'size': len(valid_entities),
-                                'confidence': 0.6
-                            })
+                            patterns.append(
+                                {
+                                    "type": "semantic_cluster",
+                                    "pattern_id": f"semantic_cluster_{cluster_id}",
+                                    "entities": valid_entities,
+                                    "size": len(valid_entities),
+                                    "confidence": 0.6,
+                                }
+                            )
 
             return patterns
 
@@ -454,18 +485,20 @@ class InsightEngine:
             logger.error(f"Semantic clustering failed: {e}")
             return []
 
-    async def _generate_insight_from_pattern(self, pattern: dict[str, Any]) -> dict[str, Any] | None:
+    async def _generate_insight_from_pattern(
+        self, pattern: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Generate an insight from a detected pattern."""
         try:
-            pattern_type = pattern['type']
+            pattern_type = pattern["type"]
 
-            if pattern_type == 'community':
+            if pattern_type == "community":
                 return await self._generate_community_insight(pattern)
-            elif pattern_type == 'centrality':
+            elif pattern_type == "centrality":
                 return await self._generate_centrality_insight(pattern)
-            elif pattern_type == 'path':
+            elif pattern_type == "path":
                 return await self._generate_path_insight(pattern)
-            elif pattern_type == 'semantic_cluster':
+            elif pattern_type == "semantic_cluster":
                 return await self._generate_semantic_insight(pattern)
 
             return None
@@ -473,14 +506,16 @@ class InsightEngine:
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error(
                 "Failed to generate insight from pattern %s: %s",
-                pattern.get('pattern_id'),
-                e
+                pattern.get("pattern_id"),
+                e,
             )
             return None
 
-    async def _generate_community_insight(self, pattern: dict[str, Any]) -> dict[str, Any]:
+    async def _generate_community_insight(
+        self, pattern: dict[str, Any]
+    ) -> dict[str, Any]:
         """Generate insight from a community pattern."""
-        nodes = pattern['nodes']
+        nodes = pattern["nodes"]
 
         # Get entity names for the nodes in the community
         entity_names = await self._get_entity_names(nodes)
@@ -521,25 +556,27 @@ class InsightEngine:
         )
 
         return {
-            'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
-            'title': f"Knowledge Community: {primary_name} cluster",
-            'content': insight_content,
-            'topic': primary_name,
-            'confidence': pattern['confidence'],
-            'pattern_type': 'community_detection',
-            'evidence': await self._get_evidence_for_nodes(nodes),
-            'metadata': {
-                'community_size': len(nodes),
-                'entity_count': len(display_names),
-                'pattern_id': pattern['pattern_id']
-            }
+            "zettel_id": f"insight_{uuid.uuid4().hex[:8]}",
+            "title": f"Knowledge Community: {primary_name} cluster",
+            "content": insight_content,
+            "topic": primary_name,
+            "confidence": pattern["confidence"],
+            "pattern_type": "community_detection",
+            "evidence": await self._get_evidence_for_nodes(nodes),
+            "metadata": {
+                "community_size": len(nodes),
+                "entity_count": len(display_names),
+                "pattern_id": pattern["pattern_id"],
+            },
         }
 
-    async def _generate_centrality_insight(self, pattern: dict[str, Any]) -> dict[str, Any]:
+    async def _generate_centrality_insight(
+        self, pattern: dict[str, Any]
+    ) -> dict[str, Any]:
         """Generate insight from a centrality pattern."""
-        central_node = pattern['central_node']
-        centrality_type = pattern['centrality_type']
-        score = pattern['score']
+        central_node = pattern["central_node"]
+        centrality_type = pattern["centrality_type"]
+        score = pattern["score"]
 
         entity_name = await self._get_entity_name(central_node)
 
@@ -548,13 +585,15 @@ class InsightEngine:
             entity_name = f"entity_{central_node}"
 
         centrality_descriptions = {
-            'betweenness': 'acts as a critical bridge between different parts of the knowledge '
-                           'network',
-            'pagerank': 'has high importance based on the network of relationships pointing to it',
-            'eigenvector': 'is connected to other highly important entities in the network'
+            "betweenness": "acts as a critical bridge between different parts of the knowledge "
+            "network",
+            "pagerank": "has high importance based on the network of relationships pointing to it",
+            "eigenvector": "is connected to other highly important entities in the network",
         }
 
-        description = centrality_descriptions.get(centrality_type, 'shows high centrality')
+        description = centrality_descriptions.get(
+            centrality_type, "shows high centrality"
+        )
 
         insight_content = (
             f"The entity '{entity_name}' demonstrates exceptional structural importance in the "
@@ -569,25 +608,25 @@ class InsightEngine:
         )
 
         return {
-            'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
-            'title': f"Central Entity: {entity_name}",
-            'content': insight_content,
-            'topic': entity_name,
-            'confidence': pattern['confidence'],
-            'pattern_type': 'centrality_analysis',
-            'evidence': await self._get_evidence_for_nodes([central_node]),
-            'metadata': {
-                'centrality_type': centrality_type,
-                'centrality_score': score,
-                'entity_id': central_node
-            }
+            "zettel_id": f"insight_{uuid.uuid4().hex[:8]}",
+            "title": f"Central Entity: {entity_name}",
+            "content": insight_content,
+            "topic": entity_name,
+            "confidence": pattern["confidence"],
+            "pattern_type": "centrality_analysis",
+            "evidence": await self._get_evidence_for_nodes([central_node]),
+            "metadata": {
+                "centrality_type": centrality_type,
+                "centrality_score": score,
+                "entity_id": central_node,
+            },
         }
 
     async def _generate_path_insight(self, pattern: dict[str, Any]) -> dict[str, Any]:
         """Generate insight from an interesting path pattern."""
-        path = pattern['path']
-        source = pattern['source']
-        target = pattern['target']
+        path = pattern["path"]
+        source = pattern["source"]
+        target = pattern["target"]
 
         source_name = await self._get_entity_name(source)
         target_name = await self._get_entity_name(target)
@@ -618,24 +657,26 @@ class InsightEngine:
         )
 
         return {
-            'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
-            'title': f"Connection Path: {source_name} ↔ {target_name}",
-            'content': insight_content,
-            'topic': f"{source_name}+{target_name}",
-            'confidence': pattern['confidence'],
-            'pattern_type': 'path_analysis',
-            'evidence': await self._get_evidence_for_nodes(path),
-            'metadata': {
-                'path_length': len(path),
-                'source_entity': source,
-                'target_entity': target,
-                'intermediate_entities': path[1:-1]
-            }
+            "zettel_id": f"insight_{uuid.uuid4().hex[:8]}",
+            "title": f"Connection Path: {source_name} ↔ {target_name}",
+            "content": insight_content,
+            "topic": f"{source_name}+{target_name}",
+            "confidence": pattern["confidence"],
+            "pattern_type": "path_analysis",
+            "evidence": await self._get_evidence_for_nodes(path),
+            "metadata": {
+                "path_length": len(path),
+                "source_entity": source,
+                "target_entity": target,
+                "intermediate_entities": path[1:-1],
+            },
         }
 
-    async def _generate_semantic_insight(self, pattern: dict[str, Any]) -> dict[str, Any]:
+    async def _generate_semantic_insight(
+        self, pattern: dict[str, Any]
+    ) -> dict[str, Any]:
         """Generate insight from semantic clustering."""
-        entities = pattern['entities']
+        entities = pattern["entities"]
         entity_names = await self._get_entity_names(entities)
 
         # Fallback to entity IDs if no entity names found
@@ -674,17 +715,14 @@ class InsightEngine:
         )
 
         return {
-            'zettel_id': f"insight_{uuid.uuid4().hex[:8]}",
-            'title': f"Semantic Cluster: {primary_name} group",
-            'content': insight_content,
-            'topic': primary_name,
-            'confidence': pattern['confidence'],
-            'pattern_type': 'semantic_clustering',
-            'evidence': await self._get_evidence_for_nodes(entities),
-            'metadata': {
-                'cluster_size': len(entities),
-                'entity_list': entities
-            }
+            "zettel_id": f"insight_{uuid.uuid4().hex[:8]}",
+            "title": f"Semantic Cluster: {primary_name} group",
+            "content": insight_content,
+            "topic": primary_name,
+            "confidence": pattern["confidence"],
+            "pattern_type": "semantic_clustering",
+            "evidence": await self._get_evidence_for_nodes(entities),
+            "metadata": {"cluster_size": len(entities), "entity_list": entities},
         }
 
     async def _get_entity_names(self, entity_ids: list[str]) -> list[str]:
@@ -703,25 +741,29 @@ class InsightEngine:
             database=self.knowledge_graph.database
         ) as session:
             try:
-                result = await session.run(query, {'entity_ids': entity_ids})
+                result = await session.run(query, {"entity_ids": entity_ids})
                 async for record in result:
                     # Filter out None values and ensure we have valid strings
-                    name = record['name']
+                    name = record["name"]
                     if name is not None and isinstance(name, str) and name.strip():
                         names.append(name.strip())
                     else:
                         # Fallback to entity ID if name is invalid
-                        entity_id = record['id']
+                        entity_id = record["id"]
                         if entity_id and isinstance(entity_id, str):
                             # Clean up entity ID to make it more readable
-                            readable_name = entity_id.replace('_', ' ').replace('-', ' ').title()
+                            readable_name = (
+                                entity_id.replace("_", " ").replace("-", " ").title()
+                            )
                             names.append(readable_name)
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug("Could not retrieve entity names: %s", e)
                 # Fallback: return cleaned entity IDs
                 for entity_id in entity_ids:
                     if entity_id and isinstance(entity_id, str):
-                        readable_name = entity_id.replace('_', ' ').replace('-', ' ').title()
+                        readable_name = (
+                            entity_id.replace("_", " ").replace("-", " ").title()
+                        )
                         names.append(readable_name)
 
         return names
@@ -734,7 +776,7 @@ class InsightEngine:
             return names[0]
         # Fallback: clean up the entity_id to make it more readable
         if entity_id:
-            return entity_id.replace('_', ' ').replace('-', ' ').title()
+            return entity_id.replace("_", " ").replace("-", " ").title()
         return "Unknown Entity"
 
     async def _get_evidence_for_nodes(self, nodes: list[str]) -> list[dict[str, Any]]:
@@ -764,19 +806,21 @@ class InsightEngine:
         ) as session:
             try:
                 # Check if we have facts and mentions relationships
-                check_result = await session.run(check_query, {'node_ids': nodes})
+                check_result = await session.run(check_query, {"node_ids": nodes})
                 check_record = await check_result.single()
 
-                if check_record and check_record['mention_count'] > 0:
+                if check_record and check_record["mention_count"] > 0:
                     # We have MENTIONS relationships, use the normal query
-                    result = await session.run(query, {'node_ids': nodes})
+                    result = await session.run(query, {"node_ids": nodes})
                     async for record in result:
-                        evidence.append({
-                            'fact_id': record['fact_id'],
-                            'statement': record['statement'],
-                            'source': record['source'],
-                            'weight': 1.0
-                        })
+                        evidence.append(
+                            {
+                                "fact_id": record["fact_id"],
+                                "statement": record["statement"],
+                                "source": record["source"],
+                                "weight": 1.0,
+                            }
+                        )
                 else:
                     # No MENTIONS relationships exist yet, try alternative evidence
                     logger.debug("No MENTIONS relationships found, using alternatives")
@@ -792,14 +836,16 @@ class InsightEngine:
                     """
 
                     try:
-                        alt_result = await session.run(alt_query, {'node_ids': nodes})
+                        alt_result = await session.run(alt_query, {"node_ids": nodes})
                         async for record in alt_result:
-                            evidence.append({
-                                'fact_id': record['fact_id'],
-                                'statement': record['statement'],
-                                'source': record['source'],
-                                'weight': 0.5  # Lower weight for indirect evidence
-                            })
+                            evidence.append(
+                                {
+                                    "fact_id": record["fact_id"],
+                                    "statement": record["statement"],
+                                    "source": record["source"],
+                                    "weight": 0.5,  # Lower weight for indirect evidence
+                                }
+                            )
                     except Exception as e:  # pylint: disable=broad-exception-caught
                         logger.debug("Alternative evidence query failed: %s", e)
 
@@ -810,9 +856,7 @@ class InsightEngine:
         return evidence
 
     async def generate_insights(
-        self,
-        topic: str | None = None,
-        confidence_threshold: float = 0.8
+        self, topic: str | None = None, confidence_threshold: float = 0.8
     ) -> list[dict[str, Any]]:
         """
         Generate insights on-demand for a specific topic or generally.
@@ -824,7 +868,7 @@ class InsightEngine:
         Returns:
             list of generated insights
         """
-        logger.info("Generating insights for topic: %s", topic or 'general')
+        logger.info("Generating insights for topic: %s", topic or "general")
 
         # Refresh analysis graph
         await self._build_analysis_graph()
@@ -841,7 +885,7 @@ class InsightEngine:
         for pattern in patterns:
             try:
                 insight = await self._generate_insight_from_pattern(pattern)
-                if insight and insight['confidence'] >= confidence_threshold:
+                if insight and insight["confidence"] >= confidence_threshold:
                     insights.append(insight)
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.error("Failed to generate insight: %s", e)
@@ -850,9 +894,7 @@ class InsightEngine:
         return insights
 
     async def _filter_patterns_by_topic(
-        self,
-        patterns: list[dict[str, Any]],
-        topic: str
+        self, patterns: list[dict[str, Any]], topic: str
     ) -> list[dict[str, Any]]:
         """Filter patterns to those relevant to a specific topic."""
         # Simple implementation - can be enhanced with semantic similarity
@@ -860,12 +902,12 @@ class InsightEngine:
         topic_lower = topic.lower()
 
         for pattern in patterns:
-            if pattern['type'] == 'community':
-                entity_names = await self._get_entity_names(pattern['nodes'])
+            if pattern["type"] == "community":
+                entity_names = await self._get_entity_names(pattern["nodes"])
                 if any(topic_lower in name.lower() for name in entity_names):
                     filtered.append(pattern)
-            elif pattern['type'] == 'centrality':
-                entity_name = await self._get_entity_name(pattern['central_node'])
+            elif pattern["type"] == "centrality":
+                entity_name = await self._get_entity_name(pattern["central_node"])
                 if topic_lower in entity_name.lower():
                     filtered.append(pattern)
             # Add more filtering logic for other pattern types
@@ -873,9 +915,7 @@ class InsightEngine:
         return filtered
 
     async def search_insights(
-        self,
-        query: str,
-        max_results: int = 10
+        self, query: str, max_results: int = 10
     ) -> list[dict[str, Any]]:
         """Search for existing insights based on a query."""
         search_query = """
@@ -896,21 +936,22 @@ class InsightEngine:
         async with self.knowledge_graph.driver.session(
             database=self.knowledge_graph.database
         ) as session:
-            result = await session.run(search_query, {
-                'query': query.lower(),
-                'limit': max_results
-            })
+            result = await session.run(
+                search_query, {"query": query.lower(), "limit": max_results}
+            )
 
             async for record in result:
-                insights.append({
-                    'zettel_id': record['zettel_id'],
-                    'title': record['title'],
-                    'content': record['content'],
-                    'confidence': record['confidence'],
-                    'pattern_type': record['pattern_type'],
-                    'created_at': record['created_at'],
-                    'evidence': [e for e in record['evidence'] if e['fact_id']]
-                })
+                insights.append(
+                    {
+                        "zettel_id": record["zettel_id"],
+                        "title": record["title"],
+                        "content": record["content"],
+                        "confidence": record["confidence"],
+                        "pattern_type": record["pattern_type"],
+                        "created_at": record["created_at"],
+                        "evidence": [e for e in record["evidence"] if e["fact_id"]],
+                    }
+                )
 
         return insights
 
@@ -925,10 +966,10 @@ class InsightEngine:
         """
 
         stats: dict[str, Any] = {
-            'total_insights': 0,
-            'active_patterns': 0,
-            'avg_confidence': 0.0,
-            'last_processing': 'Never'
+            "total_insights": 0,
+            "active_patterns": 0,
+            "avg_confidence": 0.0,
+            "last_processing": "Never",
         }
 
         async with self.knowledge_graph.driver.session(
@@ -938,14 +979,14 @@ class InsightEngine:
             record = await result.single()
 
             if record:
-                stats['total_insights'] = record['total_insights'] or 0
-                stats['avg_confidence'] = record['avg_confidence'] or 0.0
-                if record['last_processing']:
-                    last_processing_val = record['last_processing']
-                    stats['last_processing'] = datetime.fromtimestamp(
+                stats["total_insights"] = record["total_insights"] or 0
+                stats["avg_confidence"] = record["avg_confidence"] or 0.0
+                if record["last_processing"]:
+                    last_processing_val = record["last_processing"]
+                    stats["last_processing"] = datetime.fromtimestamp(
                         last_processing_val / 1000
-                    ).strftime('%Y-%m-%d %H:%M:%S')
+                    ).strftime("%Y-%m-%d %H:%M:%S")
 
-        stats['active_patterns'] = len(await self._detect_patterns())
+        stats["active_patterns"] = len(await self._detect_patterns())
 
         return stats

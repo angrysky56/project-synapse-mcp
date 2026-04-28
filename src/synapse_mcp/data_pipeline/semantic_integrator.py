@@ -30,7 +30,9 @@ class SemanticIntegrator:
         """Initialize the semantic integrator."""
         self.montague_parser = montague_parser
         self.entity_cache: dict[str, dict[str, Any]] = {}  # Cache for deduplication
+        self.logger = logger
 
+    @logger.timer()
     async def initialize(self) -> None:
         """Initialize the semantic integrator with required components."""
         if self.montague_parser is None:
@@ -40,9 +42,12 @@ class SemanticIntegrator:
             await self.montague_parser.initialize()
             logger.info("Semantic integrator initialized successfully")
         except Exception as e:
-            logger.warning("Montague parser initialization failed: %s", e, exc_info=True)
+            logger.warning(
+                "Montague parser initialization failed: %s", e, exc_info=True
+            )
             logger.info("Continuing with basic text processing only")
 
+    @logger.timer()
     async def process_text_with_semantics(
         self,
         text: str,
@@ -118,6 +123,7 @@ class SemanticIntegrator:
             "facts": [],
         }
 
+    @logger.timer()
     async def _integrate_semantic_analysis(
         self,
         processed_data: dict[str, Any],
@@ -274,6 +280,7 @@ class SemanticIntegrator:
             )
             return None
 
+    @logger.timer()
     async def _post_process_data(self, processed_data: dict[str, Any]) -> None:
         """Post-process extracted data for validation and cleanup."""
         # Deduplicate entities

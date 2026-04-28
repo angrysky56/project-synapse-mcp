@@ -31,11 +31,14 @@ class TextProcessor:
         """Initialize the text processor instance."""
         self.supported_formats = {".txt", ".md", ".json"}
         self.batch_size = int(os.getenv("SEMANTIC_BATCH_SIZE", "50"))
+        self.logger = logger
 
+    @logger.timer()
     async def initialize(self) -> None:
         """Initialize the text processor."""
         logger.info("Text processor initialized successfully")
 
+    @logger.timer()
     async def process_text(
         self,
         text: str,
@@ -92,6 +95,7 @@ class TextProcessor:
 
         return processed_data
 
+    @logger.timer()
     async def process_file(self, file_path: str | Path) -> dict[str, Any]:
         """
         Process a text file into structured data.
@@ -130,6 +134,7 @@ class TextProcessor:
             text=content, source=f"file:{file_path.name}", metadata=metadata
         )
 
+    @logger.timer()
     async def process_batch(self, texts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         Process multiple texts in batch for efficiency.
@@ -171,6 +176,7 @@ class TextProcessor:
         )
         return results
 
+    @logger.timer()
     async def _clean_text(self, text: str) -> str:
         """Clean and normalize text for processing."""
         # Remove excessive whitespace
@@ -196,6 +202,7 @@ class TextProcessor:
 
         return text
 
+    @logger.timer()
     async def _split_sentences(self, text: str) -> list[str]:
         """Split text into sentences using simple rules."""
         # Simple sentence splitting - can be enhanced with spaCy later
@@ -240,6 +247,7 @@ class TextProcessor:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"text_{timestamp}_{content_hash}"
 
+    @logger.timer()
     async def extract_entities_preview(self, text: str) -> list[dict[str, Any]]:
         """
         Quick entity extraction preview without full processing.

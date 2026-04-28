@@ -181,15 +181,48 @@ class KnowledgeUtils:
 
         # Filter out common stop words
         stop_words = {
-            "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
-            "by", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-            "have", "has", "had", "do", "does", "did", "will", "would", "could",
-            "should", "may", "might", "must", "can", "this", "that", "these", "those",
+            "the",
+            "and",
+            "or",
+            "but",
+            "in",
+            "on",
+            "at",
+            "to",
+            "for",
+            "of",
+            "with",
+            "by",
+            "a",
+            "an",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "will",
+            "would",
+            "could",
+            "should",
+            "may",
+            "might",
+            "must",
+            "can",
+            "this",
+            "that",
+            "these",
+            "those",
         }
 
-        keywords = [
-            word for word in words if word not in stop_words and len(word) > 3
-        ]
+        keywords = [word for word in words if word not in stop_words and len(word) > 3]
 
         # Return unique keywords, limited to max_keywords
         return list(dict.fromkeys(keywords))[:max_keywords]
@@ -200,8 +233,7 @@ class KnowledgeValidator:
 
     @staticmethod
     def validate_graph_consistency(
-        entities: list[Entity],
-        relationships: list[Relationship]
+        entities: list[Entity], relationships: list[Relationship]
     ) -> dict[str, list[str]]:
         """Validate consistency between entities and relationships."""
         issues: dict[str, list[str]] = {
@@ -251,8 +283,7 @@ class KnowledgeValidator:
 
     @staticmethod
     def suggest_entity_merges(
-        entities: list[Entity],
-        similarity_threshold: float = 0.8
+        entities: list[Entity], similarity_threshold: float = 0.8
     ) -> list[tuple[str, str]]:
         """Suggest entities that might be duplicates and should be merged."""
         suggestions: list[tuple[str, str]] = []
