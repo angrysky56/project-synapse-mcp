@@ -1,0 +1,9 @@
+{
+  "workflow": "standard",
+  "granularity": "standard",
+  "auto_commit": true,
+  "git_integration": true,
+  "style": "typescript-pro",
+  "python_env": "uv",
+  "mcp_enabled": true
+}
