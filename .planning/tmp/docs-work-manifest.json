@@ -1,0 +1,62 @@
+{
+  "project_name": "Project Synapse MCP",
+  "docs_root": "docs/",
+  "waves": [
+    {
+      "wave_id": 1,
+      "status": "completed",
+      "items": [
+        {
+          "type": "README",
+          "path": "README.md",
+          "mode": "supplement",
+          "status": "completed"
+        },
+        {
+          "type": "ARCHITECTURE",
+          "path": "docs/ARCHITECTURE.md",
+          "mode": "create",
+          "status": "completed"
+        },
+        {
+          "type": "CONFIGURATION",
+          "path": "docs/CONFIGURATION.md",
+          "mode": "create",
+          "status": "completed"
+        },
+        {
+          "type": "GETTING_STARTED",
+          "path": "docs/GETTING_STARTED.md",
+          "mode": "create",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "wave_id": 2,
+      "status": "completed",
+      "items": [
+        {
+          "type": "DEVELOPMENT",
+          "path": "docs/DEVELOPMENT.md",
+          "mode": "create",
+          "status": "completed"
+        },
+        {
+          "type": "TESTING",
+          "path": "docs/TESTING.md",
+          "mode": "create",
+          "status": "completed"
+        },
+        {
+          "type": "CONTRIBUTING",
+          "path": "docs/CONTRIBUTING.md",
+          "mode": "create",
+          "status": "completed"
+        }
+      ]
+    }
+  ],
+  "current_wave": 2,
+  "last_updated": "2026-04-28T21:09:00Z"
+}

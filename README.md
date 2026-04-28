@@ -1,8 +1,23 @@
 # 🧠 Project Synapse MCP Server
 
+<!-- GSD:DOCS:CANONICAL:README -->
+
 **Autonomous Knowledge Synthesis Engine with LLM-WIKI Integration**
 
+[![Documentation](https://img.shields.io/badge/docs-latest-brightgreen.svg)](docs/ARCHITECTURE.md)
+
 Project Synapse is an MCP (Model Context Protocol) server that combines a Neo4j 2026.x graph database with an Obsidian Markdown wiki to create a persistent, compounding knowledge base. Raw text is processed through a semantic pipeline into interconnected graph nodes with vector embeddings, while a human-readable wiki layer provides browsable, interlinked Markdown pages.
+
+## 📚 Documentation
+
+For detailed information on setting up and using Project Synapse, please refer to the following guides:
+
+- **[Getting Started](docs/GETTING_STARTED.md)**: Installation and first run.
+- **[Architecture](docs/ARCHITECTURE.md)**: How the semantic pipeline and graph work.
+- **[Configuration](docs/CONFIGURATION.md)**: Full list of environment variables.
+- **[Development](docs/DEVELOPMENT.md)**: Guide for adding tools and contributing.
+- **[Testing](docs/TESTING.md)**: Running the test suite.
+- **[Contributing](docs/CONTRIBUTING.md)**: Project contribution guidelines.
 
 ## What This Is (and Isn't)
 

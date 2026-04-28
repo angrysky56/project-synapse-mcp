@@ -1,0 +1,30 @@
+{
+  "doc_writer_model": "sonnet",
+  "commit_docs": true,
+  "existing_docs": [
+    {
+      "path": "README.md",
+      "has_gsd_marker": false
+    }
+  ],
+  "project_type": {
+    "has_package_json": false,
+    "has_api_routes": false,
+    "has_cli_bin": false,
+    "is_open_source": true,
+    "has_deploy_config": false,
+    "is_monorepo": false,
+    "has_tests": true
+  },
+  "doc_tooling": {
+    "docusaurus": false,
+    "vitepress": false,
+    "mkdocs": false,
+    "storybook": false
+  },
+  "monorepo_workspaces": [],
+  "planning_exists": true,
+  "project_root": "/home/ty/Repositories/ai_workspace/project-synapse-mcp",
+  "agents_installed": true,
+  "missing_agents": []
+}
