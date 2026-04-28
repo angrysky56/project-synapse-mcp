@@ -1,11 +1,18 @@
 import asyncio
 import os
+import sys
+from pathlib import Path
+
+# Add the 'src' directory to sys.path to allow absolute imports when run as a script
+src_dir = Path(__file__).resolve().parent.parent.parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
 
 from dotenv import load_dotenv
 from neo4j import AsyncGraphDatabase
 
-from ..semantic.montague_parser import MontagueParser
-from ..utils.logging_config import get_logger
+from synapse_mcp.semantic.montague_parser import MontagueParser
+from synapse_mcp.utils.logging_config import get_logger
 
 load_dotenv()
 logger = get_logger(__name__)
