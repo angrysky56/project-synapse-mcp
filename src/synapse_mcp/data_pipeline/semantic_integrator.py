@@ -73,7 +73,9 @@ class SemanticIntegrator:
         # Add semantic analysis if Montague parser is available
         if self.montague_parser and self.montague_parser.nlp:
             try:
-                semantic_analysis = await self.montague_parser.parse_text(text)
+                semantic_analysis = await self.montague_parser.parse_text(
+                    processed_data["cleaned_text"]
+                )
                 await self._integrate_semantic_analysis(
                     processed_data, semantic_analysis, source
                 )
@@ -139,8 +141,34 @@ class SemanticIntegrator:
                 processed_data["entities"].append(entity)
                 self.entity_cache[entity["id"]] = entity
 
-        # Extract and convert relationships
+        # Extract and convert relationships, auto-creating entities for endpoints
         for relation_data in semantic_analysis.get("relations", []):
+            # Auto-create entity nodes for relation endpoints not in entity cache
+            for endpoint_name in [
+                relation_data.get("subject"),
+                relation_data.get("object"),
+            ]:
+                if not endpoint_name:
+                    continue
+                endpoint_id = KnowledgeUtils.generate_entity_id(
+                    endpoint_name, "Entity"
+                )
+                if endpoint_id not in self.entity_cache:
+                    entity = {
+                        "id": endpoint_id,
+                        "name": endpoint_name,
+                        "type": "Concept",
+                        "confidence": 0.6,
+                        "source": source,
+                        "properties": {
+                            "original_label": "",
+                            "start_char": -1,
+                            "end_char": -1,
+                        },
+                    }
+                    processed_data["entities"].append(entity)
+                    self.entity_cache[endpoint_id] = entity
+
             relationship = await self._create_relationship_from_analysis(
                 relation_data, source
             )

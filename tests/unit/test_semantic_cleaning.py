@@ -33,7 +33,7 @@ async def test_clean_text_academic_noise():
     ]
 
     for input_text, expected_sub in test_cases:
-        cleaned = await integrator._clean_text(input_text)
+        cleaned = integrator._clean_text(input_text)
         assert expected_sub in cleaned
         assert "(CID:" not in cleaned
         assert "<span" not in cleaned
@@ -48,9 +48,9 @@ async def test_clean_text_punctuation_handling():
 
     # Noise stripping might leave leading commas or periods
     input_text = "\\cite{noise}, but this part is important."
-    cleaned = await integrator._clean_text(input_text)
+    cleaned = integrator._clean_text(input_text)
     assert cleaned.startswith("but this part is important")
 
     input_text = "...(CID:123) The end."
-    cleaned = await integrator._clean_text(input_text)
+    cleaned = integrator._clean_text(input_text)
     assert cleaned == "The end."

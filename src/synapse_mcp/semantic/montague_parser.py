@@ -263,7 +263,27 @@ class MontagueParser:
                         }
                     )
 
-        return relations
+        # Quality filter and deduplication
+        filtered: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for rel in relations:
+            subj = rel["subject"]
+            obj = rel["object"]
+            pred = rel["predicate"]
+            if not self._is_valid_endpoint(subj) or not self._is_valid_endpoint(obj):
+                continue
+            key = (subj.lower(), pred.lower(), obj.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered.append(rel)
+
+        logger.debug(
+            "Relation extraction: %d raw -> %d after quality filter",
+            len(relations),
+            len(filtered),
+        )
+        return filtered
 
     @logger.timer()
     async def _generate_logical_form(self, doc: Doc) -> str:
@@ -440,11 +460,41 @@ class MontagueParser:
         return f"{label.lower()}_{normalized}"
 
     def _find_entity_for_token(self, doc: Doc, token: Token) -> str:
-        """Find if a token is part of a named entity."""
+        """Find if a token is part of a named entity.
+
+        Returns the entity text if found, empty string otherwise.
+        Callers should fall back to noun_chunks for non-entity tokens.
+        """
         for ent in doc.ents:
             if token.i >= ent.start and token.i < ent.end:
                 return str(ent.text)
-        return str(token.text)
+        return ""
+
+    @staticmethod
+    def _is_valid_endpoint(text: str) -> bool:
+        """Check if a text string is a valid relation endpoint.
+
+        Filters out pronouns, determiners, HTML/LaTeX fragments,
+        and overly long strings that indicate sentence fragments.
+        """
+        if not text or len(text.strip()) < 2:
+            return False
+        # Reject if mostly non-alphanumeric (HTML/LaTeX garbage)
+        alnum_count = sum(1 for c in text if c.isalnum() or c.isspace())
+        if alnum_count / len(text) < 0.6:
+            return False
+        # Reject very long strings (likely sentence fragments)
+        if len(text) > 80:
+            return False
+        # Reject common pronouns and determiners
+        stopwords = {
+            "it", "he", "she", "they", "we", "i", "you",
+            "this", "that", "these", "those", "the", "a", "an",
+            "which", "who", "what", "there", "here", "its",
+        }
+        if text.lower().strip() in stopwords:
+            return False
+        return True
 
     def _extract_svo_pattern(
         self, sent: Span
