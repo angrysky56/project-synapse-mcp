@@ -189,7 +189,7 @@ class MontagueParser:
                     if child.dep_ in ["nsubj", "nsubjpass"]:
                         cop_subject = self._find_entity_for_token(doc, child)
                         if not cop_subject and child.i in noun_chunks:
-                            cop_subject = str(noun_chunks[child.i])
+                            cop_subject = noun_chunks[child.i]
                         break
 
                 # Find complement/attribute
@@ -198,7 +198,7 @@ class MontagueParser:
                     if child.dep_ in ["attr", "acomp", "dobj"]:
                         cop_obj = self._find_entity_for_token(doc, child)
                         if not cop_obj and child.i in noun_chunks:
-                            cop_obj = str(noun_chunks[child.i])
+                            cop_obj = noun_chunks[child.i]
                         break
 
                 if cop_subject and cop_obj:
@@ -267,9 +267,9 @@ class MontagueParser:
         filtered: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str]] = set()
         for rel in relations:
-            subj = rel["subject"]
-            obj = rel["object"]
-            pred = rel["predicate"]
+            subj = str(rel["subject"])
+            obj = str(rel["object"])
+            pred = str(rel["predicate"])
             if not self._is_valid_endpoint(subj) or not self._is_valid_endpoint(obj):
                 continue
             key = (subj.lower(), pred.lower(), obj.lower())
@@ -467,7 +467,9 @@ class MontagueParser:
         """
         for ent in doc.ents:
             if token.i >= ent.start and token.i < ent.end:
-                return str(ent.text)
+                entity_text = ent.text
+                assert isinstance(entity_text, str)
+                return entity_text
         return ""
 
     @staticmethod
@@ -488,9 +490,26 @@ class MontagueParser:
             return False
         # Reject common pronouns and determiners
         stopwords = {
-            "it", "he", "she", "they", "we", "i", "you",
-            "this", "that", "these", "those", "the", "a", "an",
-            "which", "who", "what", "there", "here", "its",
+            "it",
+            "he",
+            "she",
+            "they",
+            "we",
+            "i",
+            "you",
+            "this",
+            "that",
+            "these",
+            "those",
+            "the",
+            "a",
+            "an",
+            "which",
+            "who",
+            "what",
+            "there",
+            "here",
+            "its",
         }
         if text.lower().strip() in stopwords:
             return False

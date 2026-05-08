@@ -150,9 +150,7 @@ class SemanticIntegrator:
             ]:
                 if not endpoint_name:
                     continue
-                endpoint_id = KnowledgeUtils.generate_entity_id(
-                    endpoint_name, "Entity"
-                )
+                endpoint_id = KnowledgeUtils.generate_entity_id(endpoint_name, "Entity")
                 if endpoint_id not in self.entity_cache:
                     entity = {
                         "id": endpoint_id,
