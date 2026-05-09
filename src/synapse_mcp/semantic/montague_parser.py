@@ -452,6 +452,26 @@ class MontagueParser:
             if text_lower in ["llm", "rag", "cnn", "rnn", "transformer", "bert", "gpt"]:
                 return "Concept"
 
+            # 5. Downgrade suspicious 'Person' classifications (e.g., single words, UI terms)
+            if current_type == "Person":
+                non_person_keywords = [
+                    "wiki",
+                    "start",
+                    "config",
+                    "table",
+                    "content",
+                    "index",
+                    "file",
+                    "error",
+                    "log",
+                ]
+                if any(kw in text_lower for kw in non_person_keywords):
+                    return "Concept"
+                # If it's a single word and has numbers (like Qwen3) or is all caps (like RL), it's not a person
+                if len(text.split()) == 1:
+                    if any(c.isdigit() for c in text) or text.isupper():
+                        return "Concept"
+
         return current_type
 
     def _generate_entity_id(self, text: str, label: str) -> str:

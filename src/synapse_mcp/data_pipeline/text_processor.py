@@ -179,15 +179,60 @@ class TextProcessor:
     @logger.timer()
     async def _clean_text(self, text: str) -> str:
         """Clean and normalize text for processing."""
-        # Remove excessive whitespace
+        # 0. Remove Markdown headers, bold, italics, links
+        text = re.sub(r"^(#+)\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+        text = re.sub(r"\*(.*?)\*", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+
+        # 1. Remove HTML tags but keep content (basic stripping)
+        text = re.sub(r"</?[a-zA-Z][^>]*>", "", text)
+
+        # 2. Remove CID strings (PDF artifact)
+        text = re.sub(r"\(CID:\d+\)", "", text)
+
+        # 3. Remove LaTeX math environments
+        text = re.sub(r"\$\$.*?\$\$", " ", text, flags=re.DOTALL)
+        text = re.sub(r"\$[^$]+\$", " ", text)
+
+        # 4. Remove metadata-only LaTeX commands
+        text = re.sub(
+            r"\\(cite|ref|label|url|href|bibliographystyle|bibliography)\{.*?\}",
+            " ",
+            text,
+        )
+        text = re.sub(
+            r"\\(cite|ref|label|url|href|bibliographystyle|bibliography)", " ", text
+        )
+
+        # 5. Keep content of formatting LaTeX commands
+        text = re.sub(
+            r"\\(textbf|textit|emph|section|subsection|subsubsection)\{(.*?)\}",
+            r"\2",
+            text,
+        )
+
+        # 6. Remove remaining generic LaTeX commands
+        text = re.sub(r"\\[a-zA-Z]+\{.*?\}", " ", text)
+        text = re.sub(r"\\[a-zA-Z]+", " ", text)
+
+        # 7. Remove numeric citations like [1], [1, 2], [1-3]
+        text = re.sub(r"\[\d+(?:,\s*\d+|-\d+)*\]", " ", text)
+
+        # 8. Remove parenthetical citations like (Author, 2020)
+        text = re.sub(r"\([A-Z][a-z]+(?:\s+et\s+al\.)?,\s*\d{4}\)", " ", text)
+
+        # 9. Normalize whitespace and problematic characters
         text = re.sub(r"\s+", " ", text)
 
-        # Remove special characters that might interfere with processing
         # Keep alphanumeric, spaces, and basic punctuation
         import string
 
         allowed_chars = (
-            string.ascii_letters + string.digits + string.whitespace + ".,!?;:-()[]\"'/"
+            string.ascii_letters
+            + string.digits
+            + string.whitespace
+            + ".,!?;:-()[]\"'/&"
         )
         text = "".join(char for char in text if char in allowed_chars)
 
@@ -195,8 +240,11 @@ class TextProcessor:
         text = re.sub(r"[\u201C\u201D]", '"', text)  # Smart double quotes
         text = re.sub(r"[\u2018\u2019]", "'", text)  # Smart single quotes
 
-        # Strip and ensure text ends with punctuation
+        # 10. Strip and ensure proper ending
         text = text.strip()
+        # Remove leading/trailing punctuation that might result from stripping noise
+        text = re.sub(r"^[.,!?;:-]+", "", text).strip()
+
         if text and text[-1] not in ".!?":
             text += "."
 
@@ -261,14 +309,20 @@ class TextProcessor:
         # Simple regex-based entity detection for preview
         entities: list[dict[str, Any]] = []
 
-        # Detect potential person names (capitalized words)
-        person_pattern = r"\b[A-Z][a-z]+ [A-Z][a-z]+\b"
-        for match in re.finditer(person_pattern, text):
+        # Detect potential concepts/entities (capitalized words)
+        # Avoid adverbs and section headers like "Quick Start", "Simply"
+        stopwords_and_noise = {"Quick Start", "Config Files", "Table of Contents"}
+        concept_pattern = r"\b[A-Z][a-z]+(?: [A-Z][a-z]+)?\b"
+        for match in re.finditer(concept_pattern, text):
+            matched_text = match.group().strip()
+            if matched_text in stopwords_and_noise or matched_text.endswith("ly"):
+                continue
+
             entities.append(
                 {
-                    "text": match.group(),
-                    "type": "Person",
-                    "confidence": 0.7,
+                    "text": matched_text,
+                    "type": "Concept",
+                    "confidence": 0.6,
                     "start": match.start(),
                     "end": match.end(),
                 }

@@ -143,32 +143,50 @@ class SemanticIntegrator:
 
         # Extract and convert relationships, auto-creating entities for endpoints
         for relation_data in semantic_analysis.get("relations", []):
+            subj_text = relation_data.get("subject", "").strip()
+            obj_text = relation_data.get("object", "").strip()
+
+            if not subj_text or not obj_text:
+                continue
+
             # Auto-create entity nodes for relation endpoints not in entity cache
-            for endpoint_name in [
-                relation_data.get("subject"),
-                relation_data.get("object"),
-            ]:
-                if not endpoint_name:
-                    continue
-                endpoint_id = KnowledgeUtils.generate_entity_id(endpoint_name, "Entity")
-                if endpoint_id not in self.entity_cache:
-                    entity = {
-                        "id": endpoint_id,
-                        "name": endpoint_name,
-                        "type": "Concept",
-                        "confidence": 0.6,
-                        "source": source,
-                        "properties": {
-                            "original_label": "",
-                            "start_char": -1,
-                            "end_char": -1,
-                        },
-                    }
-                    processed_data["entities"].append(entity)
-                    self.entity_cache[endpoint_id] = entity
+            for endpoint_name in [subj_text, obj_text]:
+                # Attempt to find the entity in processed_data["entities"]
+                endpoint_id = None
+                for ent in processed_data["entities"]:
+                    if ent["name"].lower() == endpoint_name.lower():
+                        endpoint_id = ent["id"]
+                        break
+
+                # Also check cache
+                if not endpoint_id:
+                    for ent in self.entity_cache.values():
+                        if ent["name"].lower() == endpoint_name.lower():
+                            endpoint_id = ent["id"]
+                            break
+
+                if not endpoint_id:
+                    endpoint_id = KnowledgeUtils.generate_entity_id(
+                        endpoint_name, "Concept"
+                    )
+                    if endpoint_id not in self.entity_cache:
+                        entity = {
+                            "id": endpoint_id,
+                            "name": endpoint_name,
+                            "type": "Concept",
+                            "confidence": 0.6,
+                            "source": source,
+                            "properties": {
+                                "original_label": "",
+                                "start_char": -1,
+                                "end_char": -1,
+                            },
+                        }
+                        processed_data["entities"].append(entity)
+                        self.entity_cache[endpoint_id] = entity
 
             relationship = await self._create_relationship_from_analysis(
-                relation_data, source
+                relation_data, source, processed_data
             )
             if relationship:
                 processed_data["relationships"].append(relationship)
@@ -241,17 +259,37 @@ class SemanticIntegrator:
             return None
 
     async def _create_relationship_from_analysis(
-        self, relation_data: dict[str, Any], source: str
+        self, relation_data: dict[str, Any], source: str, processed_data: dict[str, Any]
     ) -> dict[str, Any] | None:
         """Convert semantic analysis relation to knowledge graph format."""
         try:
+            subj_text = relation_data.get("subject", "")
+            obj_text = relation_data.get("object", "")
+
             # Create entity IDs for subject and object
-            subject_id = KnowledgeUtils.generate_entity_id(
-                relation_data["subject"], "Entity"
-            )
-            object_id = KnowledgeUtils.generate_entity_id(
-                relation_data["object"], "Entity"
-            )
+            subject_id = None
+            object_id = None
+            for ent in processed_data["entities"]:
+                if ent["name"].lower() == subj_text.lower():
+                    subject_id = ent["id"]
+                if ent["name"].lower() == obj_text.lower():
+                    object_id = ent["id"]
+
+            if not subject_id:
+                for ent in self.entity_cache.values():
+                    if ent["name"].lower() == subj_text.lower():
+                        subject_id = ent["id"]
+                        break
+            if not object_id:
+                for ent in self.entity_cache.values():
+                    if ent["name"].lower() == obj_text.lower():
+                        object_id = ent["id"]
+                        break
+
+            if not subject_id:
+                subject_id = KnowledgeUtils.generate_entity_id(subj_text, "Concept")
+            if not object_id:
+                object_id = KnowledgeUtils.generate_entity_id(obj_text, "Concept")
 
             # Ensure all property values are primitive types
             properties = {}
@@ -357,6 +395,12 @@ class SemanticIntegrator:
         Removes academic noise like LaTeX commands, HTML artifacts, and CID strings
         that pollute the entity space during ingestion.
         """
+        # 0. Remove Markdown headers, bold, italics, links
+        text = re.sub(r"^(#+)\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+        text = re.sub(r"\*(.*?)\*", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+
         # 1. Remove HTML tags but keep content (basic stripping)
         text = re.sub(r"</?[a-zA-Z][^>]*>", "", text)
 
