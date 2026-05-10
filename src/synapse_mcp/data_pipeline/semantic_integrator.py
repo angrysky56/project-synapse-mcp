@@ -354,15 +354,21 @@ class SemanticIntegrator:
                 unique_entities[entity["id"]] = entity
         processed_data["entities"] = list(unique_entities.values())
 
-        # Validate relationships have valid entity references
+        # Validate relationships have valid entity references (including cached entities)
         valid_entity_ids = {entity["id"] for entity in processed_data["entities"]}
         valid_relationships = []
 
         for rel in processed_data["relationships"]:
-            if (
+            source_valid = (
                 rel["source_id"] in valid_entity_ids
-                and rel["target_id"] in valid_entity_ids
-            ):
+                or rel["source_id"] in self.entity_cache
+            )
+            target_valid = (
+                rel["target_id"] in valid_entity_ids
+                or rel["target_id"] in self.entity_cache
+            )
+
+            if source_valid and target_valid:
                 valid_relationships.append(rel)
             else:
                 logger.debug("Removing invalid relationship: %s", rel)
@@ -395,8 +401,10 @@ class SemanticIntegrator:
         Removes academic noise like LaTeX commands, HTML artifacts, and CID strings
         that pollute the entity space during ingestion.
         """
-        # 0. Remove Markdown headers, bold, italics, links
+        # 0. Remove Markdown headers, bold, italics, links, and code blocks
         text = re.sub(r"^(#+)\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+        text = re.sub(r"`[^`]+`", " ", text)
         text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
         text = re.sub(r"\*(.*?)\*", r"\1", text)
         text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)

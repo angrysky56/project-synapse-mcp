@@ -179,8 +179,10 @@ class TextProcessor:
     @logger.timer()
     async def _clean_text(self, text: str) -> str:
         """Clean and normalize text for processing."""
-        # 0. Remove Markdown headers, bold, italics, links
+        # 0. Remove Markdown headers, bold, italics, links, and code blocks
         text = re.sub(r"^(#+)\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+        text = re.sub(r"`[^`]+`", " ", text)
         text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
         text = re.sub(r"\*(.*?)\*", r"\1", text)
         text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)

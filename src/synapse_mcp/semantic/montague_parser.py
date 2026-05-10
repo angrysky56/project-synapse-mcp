@@ -112,6 +112,9 @@ class MontagueParser:
         entities = []
 
         for ent in doc.ents:
+            if not self._is_valid_endpoint(ent.text):
+                continue
+
             # Calculate confidence based on entity characteristics
             confidence = self._calculate_entity_confidence(ent)
 
@@ -432,13 +435,54 @@ class MontagueParser:
         ]
 
         # High-confidence Organizations often misidentified by NER
-        org_names = ["openai", "google", "anthropic", "meta", "microsoft", "deepmind"]
+        org_names = [
+            "openai",
+            "google",
+            "anthropic",
+            "meta",
+            "microsoft",
+            "deepmind",
+            "huggingface",
+            "mistral",
+            "cohere",
+            "nvidia",
+        ]
+
+        # High-confidence Products often misidentified
+        product_names = [
+            "qwen",
+            "gpt",
+            "llama",
+            "claude",
+            "gemini",
+            "mixtral",
+            "starcoder",
+            "phi",
+            "gemma",
+        ]
 
         # Only refine types that are frequently misidentified for technical terms
-        if current_type in ["Organization", "Product", "Person", "Entity"]:
+        if current_type in [
+            "Organization",
+            "Product",
+            "Person",
+            "Entity",
+            "Concept",
+            "Location",
+        ]:
             # 1. Check for high-confidence organizations
             if any(org in text_lower for org in org_names):
                 return "Organization"
+
+            # 1.5. Check for high-confidence products (LLM models, tools)
+            if any(prod in text_lower for prod in product_names):
+                return "Product"
+
+            # If it's a single word with numbers (e.g., "Qwen3", "GPT4"), likely a Product
+            if len(text.split()) == 1 and any(c.isdigit() for c in text):
+                # Only if it also has letters (to avoid pure numbers being products)
+                if any(c.isalpha() for c in text):
+                    return "Product"
 
             # 2. Check for technical Methods
             if any(kw in text_lower for kw in method_keywords):
@@ -449,7 +493,18 @@ class MontagueParser:
                 return "Concept"
 
             # 4. Specific common AI acronyms/terms
-            if text_lower in ["llm", "rag", "cnn", "rnn", "transformer", "bert", "gpt"]:
+            if text_lower in [
+                "llm",
+                "rag",
+                "cnn",
+                "rnn",
+                "transformer",
+                "bert",
+                "rl",
+                "rlhf",
+                "dpo",
+                "ppo",
+            ]:
                 return "Concept"
 
             # 5. Downgrade suspicious 'Person' classifications (e.g., single words, UI terms)
@@ -497,18 +552,45 @@ class MontagueParser:
         """Check if a text string is a valid relation endpoint.
 
         Filters out pronouns, determiners, HTML/LaTeX fragments,
-        and overly long strings that indicate sentence fragments.
+        overly long strings, generic words, and code leakage.
         """
         if not text or len(text.strip()) < 2:
             return False
+
+        text_str = text.strip()
+        text_lower = text_str.lower()
+
         # Reject if mostly non-alphanumeric (HTML/LaTeX garbage)
-        alnum_count = sum(1 for c in text if c.isalnum() or c.isspace())
-        if alnum_count / len(text) < 0.6:
+        alnum_count = sum(1 for c in text_str if c.isalnum() or c.isspace())
+        if alnum_count / max(len(text_str), 1) < 0.6:
             return False
+
         # Reject very long strings (likely sentence fragments)
-        if len(text) > 80:
+        if len(text_str) > 80:
             return False
-        # Reject common pronouns and determiners
+
+        # Reject code leakage
+        code_patterns = [
+            r"print\(",
+            r"console\.",
+            r"def ",
+            r"class ",
+            r"return ",
+            r"import ",
+            r"from .* import",
+            r"const ",
+            r"let ",
+            r"var ",
+            r"=>",
+            r"\{.*\}",
+            r"\(\)",
+        ]
+        import re
+
+        if any(re.search(p, text_str) for p in code_patterns):
+            return False
+
+        # Reject common pronouns, determiners, and generic non-entities
         stopwords = {
             "it",
             "he",
@@ -530,9 +612,35 @@ class MontagueParser:
             "there",
             "here",
             "its",
+            "simply",
+            "auto",
+            "available",
+            "body",
+            "yes",
+            "no",
+            "true",
+            "false",
+            "none",
+            "null",
+            "undefined",
+            "maybe",
+            "always",
+            "never",
+            "sometimes",
+            "often",
+            "usually",
+            "some",
+            "any",
+            "all",
+            "many",
+            "much",
+            "few",
+            "most",
+            "several",
         }
-        if text.lower().strip() in stopwords:
+        if text_lower in stopwords:
             return False
+
         return True
 
     def _extract_svo_pattern(
