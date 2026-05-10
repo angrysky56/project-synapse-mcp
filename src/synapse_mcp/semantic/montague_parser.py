@@ -478,6 +478,12 @@ class MontagueParser:
             if any(prod in text_lower for prod in product_names):
                 return "Product"
 
+            # Numeric+unit combos like "50ms", "100x" are NOT products — they're measurements
+            import re as _re_num
+
+            if _re_num.match(r"^\d+[a-zA-Z]{1,3}$", text.strip()):
+                return "Concept"
+
             # If it's a single word with numbers (e.g., "Qwen3", "GPT4"), likely a Product
             if len(text.split()) == 1 and any(c.isdigit() for c in text):
                 # Only if it also has letters (to avoid pure numbers being products)
@@ -510,6 +516,7 @@ class MontagueParser:
             # 5. Downgrade suspicious 'Person' classifications (e.g., single words, UI terms)
             if current_type == "Person":
                 non_person_keywords = [
+                    # UI / navigation terms
                     "wiki",
                     "start",
                     "config",
@@ -519,13 +526,234 @@ class MontagueParser:
                     "file",
                     "error",
                     "log",
+                    "menu",
+                    "nav",
+                    "search",
+                    "home",
+                    "login",
+                    "logout",
+                    "submit",
+                    "cancel",
+                    "close",
+                    "open",
+                    "save",
+                    "edit",
+                    "delete",
+                    "view",
+                    "share",
+                    "download",
+                    # Platforms / organizations (commonly misclassified)
+                    "github",
+                    "gitlab",
+                    "bitbucket",
+                    "npm",
+                    "pypi",
+                    "docker",
+                    "kubernetes",
+                    "aws",
+                    "azure",
+                    "gcp",
+                    "heroku",
+                    "vercel",
+                    "netlify",
+                    "cloudflare",
+                    "stripe",
+                    "paypal",
+                    # Products / frameworks
+                    "react",
+                    "vue",
+                    "angular",
+                    "svelte",
+                    "nextjs",
+                    "nuxt",
+                    "django",
+                    "flask",
+                    "fastapi",
+                    "express",
+                    "koa",
+                    "rails",
+                    "spring",
+                    "tensorflow",
+                    "pytorch",
+                    "keras",
+                    "hugging",
+                    "grok",
+                    "copilot",
+                    "codex",
+                    "chatgpt",
+                    "claude",
+                    "gemini",
+                    # Abbreviations that are never people
+                    "api",
+                    "sdk",
+                    "cli",
+                    "gui",
+                    "ide",
+                    "url",
+                    "uri",
+                    "json",
+                    "yaml",
+                    "html",
+                    "css",
+                    "sql",
+                    "nosql",
+                    "rest",
+                    "grpc",
+                    "llm",
+                    "ml",
+                    "ai",
+                    "nlp",
+                    "cv",
+                    # Academic / conference abbreviations
+                    "iclr",
+                    "icml",
+                    "neurips",
+                    "aaai",
+                    "cvpr",
+                    "acl",
+                    "emnlp",
+                    # Role suffixes (these are roles, not names)
+                    "professor",
+                    "director",
+                    "manager",
+                    "engineer",
+                    "researcher",
+                    "scientist",
+                    "analyst",
+                    "architect",
+                    "designer",
+                    "developer",
                 ]
                 if any(kw in text_lower for kw in non_person_keywords):
                     return "Concept"
+                # Role suffixes: "X Engineer", "Y Director", etc. → not people
+                role_suffixes = [
+                    "engineer",
+                    "director",
+                    "manager",
+                    "professor",
+                    "researcher",
+                    "scientist",
+                    "analyst",
+                    "architect",
+                    "designer",
+                    "developer",
+                    "lead",
+                    "head",
+                    "chief",
+                    "fellow",
+                    "advisor",
+                    "consultant",
+                    "founder",
+                    "ceo",
+                    "cto",
+                    "cfo",
+                    "coo",
+                    "vp",
+                ]
+                if any(text_lower.endswith(f" {s}") for s in role_suffixes):
+                    return "Concept"
+                # Abbreviations: 2-4 all-caps letters with no lowercase = org/concept
+                if len(text) <= 5 and text.isupper() and text.isalpha():
+                    return "Organization"
                 # If it's a single word and has numbers (like Qwen3) or is all caps (like RL), it's not a person
                 if len(text.split()) == 1:
                     if any(c.isdigit() for c in text) or text.isupper():
                         return "Concept"
+                # Tier/rank/grade patterns: "Grade A", "Tier 2", "Rung 4" → Concept
+                rank_prefixes = [
+                    "grade",
+                    "tier",
+                    "rung",
+                    "level",
+                    "rank",
+                    "stage",
+                    "phase",
+                    "step",
+                    "class",
+                    "category",
+                    "band",
+                    "rank",
+                ]
+                words = text.split()
+                if len(words) == 2 and words[0].lower() in rank_prefixes:
+                    return "Concept"
+                # Past-tense verb patterns: "Library Published", "Bug Found" → Concept
+                # Words ending in -ed, -ing that aren't surnames
+                import re as _re
+
+                if len(words) == 2 and _re.match(r"^[A-Z][a-z]+ed$", words[1]):
+                    return "Concept"
+                # Possessive names: "Peter Steinberger\'s" → strip possessive
+                if text.endswith("'s") or text.endswith("'s"):
+                    pass
+
+        # === Type-agnostic entity quality checks ===
+        _stripped = text.strip()
+        _stripped_lower = _stripped.lower()
+
+        # Reject entities that end with truncated conjunctions/ampersands
+        if (
+            _stripped.endswith("&")
+            or _stripped_lower.endswith("and")
+            or _stripped_lower.endswith("or")
+        ):
+            return "Concept"
+
+        # Reject numeric+unit combos like "50ms", "100x" regardless of type
+        import re as _re2
+
+        if _re2.match(r"^\d+[a-zA-Z]{1,3}$", _stripped):
+            return "Concept"
+
+        # Reject generic verbs misclassified as Product (Recommended, Verify, etc.)
+        if current_type == "Product":
+            verb_words = {
+                "recommended",
+                "verify",
+                "verified",
+                "discovery",
+                "required",
+                "available",
+                "included",
+                "optional",
+                "default",
+                "enabled",
+                "disabled",
+                "installed",
+                "running",
+                "building",
+                "testing",
+            }
+            if text_lower in verb_words or text_lower.rstrip("d") in verb_words:
+                return "Concept"
+
+        # Organization names with "Phase" or version-like patterns → Concept
+        if current_type == "Organization":
+            phase_words = ["phase", "stage", "step", "level", "version", "build"]
+            words = _stripped.split()
+            if len(words) == 2 and words[0].lower() in phase_words:
+                return "Concept"
+            # Truncated org names ending with "Nothing", "CI" without context
+            if _stripped_lower.endswith("nothing") or _stripped_lower.endswith(" ci"):
+                return "Concept"
+
+        # Known platform/product names that are NOT people
+        platform_names = {
+            "product hunt",
+            "asana",
+            "max",
+            "linear",
+            "figma",
+            "sketch",
+            "notion",
+            "slack",
+            "trello",
+            "vercel",
+            "railway",
+        }
+        if text_lower in platform_names:
+            return "Organization"
 
         return current_type
 
@@ -543,7 +771,8 @@ class MontagueParser:
         for ent in doc.ents:
             if token.i >= ent.start and token.i < ent.end:
                 entity_text = ent.text
-                assert isinstance(entity_text, str)
+                if not isinstance(entity_text, str):
+                    raise TypeError(f"Expected str for entity_text, got {type(entity_text)}")
                 return entity_text
         return ""
 
@@ -552,7 +781,8 @@ class MontagueParser:
         """Check if a text string is a valid relation endpoint.
 
         Filters out pronouns, determiners, HTML/LaTeX fragments,
-        overly long strings, generic words, and code leakage.
+        overly long strings, generic words, section headers, code leakage,
+        and TOC/navigation artifacts.
         """
         if not text or len(text.strip()) < 2:
             return False
@@ -569,7 +799,38 @@ class MontagueParser:
         if len(text_str) > 80:
             return False
 
-        # Reject code leakage
+        # === FIX Bug 3: Reject section headers, TOC markers, navigation ===
+        header_patterns = [
+            r"^#{1,6}\s",  # Residual hash headings
+            r"^[ivxlcdm]+\.",  # Roman numeral TOC (I. II. III.)
+            r"^\d+[\.\)]\s*",  # Numbered TOC (1. 2. 3.)
+            r"^[-*_]{3,}$",  # Horizontal rules
+            r"^\[toc\]",  # Explicit TOC markers
+            r"^\[#",  # Heading markdown leftover
+            r"table of contents",
+            r"^contents$",
+            r"^index$",
+            r"^summary$",
+            r"^back to top$",
+            r"^read more$",
+            r"^acknowledgements$",
+            r"^references$",
+            r"^appendix$",
+            r"^figure\s+\d+",  # Figure X
+            r"^table\s+\d+",  # Table Y
+        ]
+        if any(re.search(p, text_str, re.IGNORECASE) for p in header_patterns):
+            return False
+
+        # Reject text that looks like multi-line fragments or labels
+        if text_str.count("\n") > 2:
+            return False
+        stripped = text_str.strip("#-*_ \t\n")
+        if not stripped:
+            return False
+        # === END FIX Bug 3 ===
+
+        # === FIX Bug 6: Reject code leakage patterns ===
         code_patterns = [
             r"print\(",
             r"console\.",
@@ -584,14 +845,26 @@ class MontagueParser:
             r"=>",
             r"\{.*\}",
             r"\(\)",
+            r"\$\{",  # Template literals ${...}
+            r"func ",  # Go functions
+            r"fn ",  # Rust functions
+            r"pub ",  # Rust public
+            r"async ",  # Async patterns
+            r"await ",  # Await patterns
+            r"->",  # Type annotations / return types
+            r"::",  # Rust/Cpp path syntax
+            r"\[\]",  # Empty array brackets
+            r"//",  # Comments
+            r"#",  # Hash comments (leftover)
+            r"\d+\.\d+\.\d+",  # Version strings (1.2.3)
         ]
-        import re
-
         if any(re.search(p, text_str) for p in code_patterns):
             return False
+        # === END FIX Bug 6 ===
 
-        # Reject common pronouns, determiners, and generic non-entities
+        # Expanded stopwords for generic word leakage
         stopwords = {
+            # Pronouns & determiners
             "it",
             "he",
             "she",
@@ -612,33 +885,289 @@ class MontagueParser:
             "there",
             "here",
             "its",
-            "simply",
-            "auto",
-            "available",
-            "body",
-            "yes",
-            "no",
-            "true",
-            "false",
-            "none",
-            "null",
-            "undefined",
-            "maybe",
+            "them",
+            "their",
+            "his",
+            "her",
+            "our",
+            "my",
+            "your",
+            "me",
+            "us",
+            "him",
+            # Common verbs with no entity meaning
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "will",
+            "would",
+            "could",
+            "should",
+            "may",
+            "might",
+            "must",
+            "shall",
+            "can",
+            # Generic adjectives / adverbs
+            "also",
+            "very",
+            "just",
+            "only",
+            "even",
+            "still",
+            "already",
             "always",
             "never",
             "sometimes",
             "often",
             "usually",
+            "really",
+            "quite",
+            "rather",
+            "more",
+            "most",
             "some",
             "any",
             "all",
             "many",
             "much",
             "few",
-            "most",
             "several",
+            "each",
+            "every",
+            "both",
+            "either",
+            "neither",
+            "such",
+            "same",
+            "other",
+            "another",
+            "simple",
+            "basic",
+            "main",
+            "new",
+            "old",
+            "good",
+            "better",
+            "best",
+            "first",
+            "last",
+            "long",
+            "short",
+            "high",
+            "low",
+            "right",
+            "left",
+            "large",
+            "small",
+            "big",
+            "next",
+            # Boolean / null-like tokens
+            "true",
+            "false",
+            "null",
+            "none",
+            "undefined",
+            "empty",
+            "yes",
+            "no",
+            "ok",
+            "okay",
+            "maybe",
+            "perhaps",
+            # Structure / formatting words
+            "section",
+            "chapter",
+            "part",
+            "step",
+            "page",
+            "line",
+            "number",
+            "amount",
+            "total",
+            "sum",
+            "value",
+            "point",
+            "type",
+            "kind",
+            "sort",
+            "case",
+            "order",
+            "level",
+            "base",
+            "mode",
+            "format",
+            "version",
+            "build",
+            "release",
+            "list",
+            "array",
+            "set",
+            "map",
+            "hash",
+            "flag",
+            "mark",
+            # Software / engineering noise
+            "code",
+            "function",
+            "method",
+            "class",
+            "object",
+            "instance",
+            "element",
+            "component",
+            "attribute",
+            "property",
+            "field",
+            "key",
+            "string",
+            "integer",
+            "table",
+            "column",
+            "row",
+            "file",
+            "path",
+            "name",
+            "size",
+            "system",
+            "service",
+            "module",
+            "endpoint",
+            "interface",
+            "library",
+            "framework",
+            "engine",
+            "tool",
+            "package",
+            # Prepositions / conjunctions
+            "for",
+            "with",
+            "from",
+            "into",
+            "about",
+            "between",
+            "through",
+            "during",
+            "before",
+            "after",
+            "above",
+            "below",
+            "under",
+            "over",
+            "out",
+            "off",
+            "up",
+            "down",
+            "in",
+            "on",
+            "at",
+            "to",
+            "of",
+            "and",
+            "or",
+            "but",
+            "not",
+            "so",
+            "if",
+            "as",
+            "by",
+            # Redundant qualifiers
+            "simply",
+            "auto",
+            "available",
+            "body",
+            "yet",
+            "ever",
+            # Time / quantity (usually not entities)
+            "time",
+            "day",
+            "week",
+            "month",
+            "year",
+            "hour",
+            "minute",
+            "second",
+            "today",
+            "tomorrow",
+            "yesterday",
+            "now",
+            "then",
+            "when",
+            "while",
+            "moment",
         }
         if text_lower in stopwords:
+            return False
+
+        # Reject plain numbers or single special chars
+        if text_str.isdigit() or (len(text_str) == 1 and not text_str.isalpha()):
+            return False
+
+        # Reject sentence fragments: if it contains common verbs, articles, or
+        # conjunctions mid-phrase, it's likely a noun chunk that went wrong.
+        fragment_indicators = [
+            " is ",
+            " are ",
+            " was ",
+            " were ",
+            " has ",
+            " have ",
+            " had ",
+            " do ",
+            " does ",
+            " did ",
+            " will ",
+            " can ",
+            " may ",
+            " should ",
+            " the ",
+            " a ",
+            " an ",
+            " and ",
+            " or ",
+            " but ",
+            " if ",
+            " so ",
+            " that ",
+            " which ",
+            " who ",
+            " when ",
+            " where ",
+            " how ",
+            " for ",
+            " with ",
+            " from ",
+            " into ",
+            " about ",
+            " than ",
+            " - ",
+            " & ",
+            " / ",
+            " = ",
+            " at ",
+            " by ",
+            " on ",
+            " in ",
+            " to ",
+            " of ",
+        ]
+        if any(ind in text_lower for ind in fragment_indicators):
+            return False
+
+        # Reject purely numeric+unit combos like "50ms", "100x", "10x"
+        import re as _re
+
+        if _re.match(r"^\d+[a-zA-Z]{1,3}$", text_str):
             return False
 
         return True

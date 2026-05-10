@@ -296,10 +296,26 @@ class SemanticIntegrator:
             properties["predicate"] = str(relation_data.get("predicate", ""))
             properties["source_span"] = str(relation_data.get("source_span", ""))
 
+            # Normalize predicate to a small set of meaningful edge types.
+            # Most verbs should become RELATES with the original predicate stored as a property.
+            predicate_raw = str(relation_data.get("predicate", "RELATES"))
+            pred_lower = predicate_raw.lower()
+            if pred_lower in ("is-be", "is-become", "is", "are"):
+                edge_type = "IS_A"
+            elif pred_lower in ("possesses", "have", "has", "had"):
+                edge_type = "POSSESSES"
+            elif pred_lower.startswith("relates-via-"):
+                edge_type = "RELATES"
+            elif pred_lower in ("modifies", "compound"):
+                edge_type = "MODIFIES"
+            else:
+                edge_type = "RELATES"
+            properties["predicate"] = predicate_raw  # Preserve original for queries
+
             return {
                 "source_id": subject_id,
                 "target_id": object_id,
-                "type": relation_data.get("predicate", "RELATES"),
+                "type": edge_type,
                 "confidence": float(relation_data.get("confidence", 0.7)),
                 "source": source,
                 "properties": properties,
@@ -345,9 +361,51 @@ class SemanticIntegrator:
             return None
 
     @logger.timer()
+    async def _merge_entities_by_name(self, entities: list[dict]) -> list[dict]:
+        """Merge entities that share the same normalized name or where one is a substring of another.
+
+        Fixes name fragmentation: e.g., 'Amirhossein' and 'Amirhossein Kazemnejad'
+        get merged into the longer form (higher-confidence / longer name wins).
+        """
+        if not entities:
+            return entities
+
+        # Sort by name length descending so longer names are kept as canonical
+        sorted_entities = sorted(entities, key=lambda e: len(e["name"]), reverse=True)
+        merged: list[dict] = []
+        consumed_ids: set[str] = set()
+
+        for i, entity in enumerate(sorted_entities):
+            if entity["id"] in consumed_ids:
+                continue
+            canonical = dict(entity)
+            consumed_ids.add(entity["id"])
+
+            # Check if any remaining entity name is contained within this one
+            for j, other in enumerate(sorted_entities):
+                if j <= i or other["id"] in consumed_ids:
+                    continue
+                # Substring containment (case-insensitive)
+                if other["name"].lower() in canonical["name"].lower():
+                    # Merge: keep the confidence of the more confident one
+                    if other.get("confidence", 0.5) > canonical.get("confidence", 0.5):
+                        canonical["confidence"] = other["confidence"]
+                    # Prefer the longer name's type, but allow type upgrades
+                    consumed_ids.add(other["id"])
+
+            merged.append(canonical)
+
+        return merged
+
     async def _post_process_data(self, processed_data: dict[str, Any]) -> None:
         """Post-process extracted data for validation and cleanup."""
-        # Deduplicate entities
+        # FIX Bug 2: Merge fragmented entities before deduplication
+        if processed_data["entities"]:
+            processed_data["entities"] = await self._merge_entities_by_name(
+                processed_data["entities"]
+            )
+
+        # Deduplicate entities by ID
         unique_entities: dict[str, dict[str, Any]] = {}
         for entity in processed_data["entities"]:
             if entity["id"] not in unique_entities:
@@ -401,13 +459,23 @@ class SemanticIntegrator:
         Removes academic noise like LaTeX commands, HTML artifacts, and CID strings
         that pollute the entity space during ingestion.
         """
-        # 0. Remove Markdown headers, bold, italics, links, and code blocks
-        text = re.sub(r"^(#+)\s+", "", text, flags=re.MULTILINE)
-        text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-        text = re.sub(r"`[^`]+`", " ", text)
-        text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
-        text = re.sub(r"\*(.*?)\*", r"\1", text)
-        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        # 0. Remove Markdown headers, bold, italics, links, code blocks, and INLINE CODE
+        text = re.sub(
+            r"^(#+)\s+\[", r"", text, flags=re.MULTILINE
+        )  # heading+link combos
+        text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)  # fenced code blocks
+        text = re.sub(r"``.*?``", " ", text, flags=re.DOTALL)  # inline double-backtick
+        text = re.sub(r"`[^`]+`", " ", text)  # inline single-backtick
+        text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)  # bold
+        text = re.sub(r"\*(.*?)\*", r"\1", text)  # italic
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # markdown links
+
+        # 0b. Strip YAML frontmatter
+        text = re.sub(r"^---\s*\n.*?\n---", " ", text, flags=re.MULTILINE | re.DOTALL)
+
+        # 0c. Remove table rows and wiki-table syntax
+        text = re.sub(r"^\|.*\|$", " ", text, flags=re.MULTILINE)  # table rows
+        text = re.sub(r"^[=|-]{3,}$", " ", text, flags=re.MULTILINE)  # table separators
 
         # 1. Remove HTML tags but keep content (basic stripping)
         text = re.sub(r"</?[a-zA-Z][^>]*>", "", text)
