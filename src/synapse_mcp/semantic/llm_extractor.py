@@ -77,7 +77,7 @@ class LlmExtractor:
             "2. DO NOT extract: navigation labels, UI button text, citation counts, "
             "download counts, 'HuggingFace' page furniture, or page metadata.\n"
             "3. DO NOT extract: generic fragments like 'the article' or 'this model'.\n"
-            "4. Predicates must be precise, directed ontological morphisms (e.g., 'implements_paradigm', 'instantiates_pattern', 'formalizes').\n"
+            "4. Predicates must be technical, directed graph relations (e.g., 'implements', 'depends_on', 'utilizes', 'defines', 'is_instance_of').\n"
             "5. Use consistent, snake_case or SCREAMING_SNAKE_CASE for entity types.\n"
             "7. If the source contains URLs, DO NOT extract them as entities unless they are primary subjects.\n\n"
             "CRITICAL: Output ONLY valid JSON format. No chat, no summary, no markdown formatting outside the JSON, simply analyse and fill in the JSON object.\n\n"
@@ -237,12 +237,8 @@ class LlmExtractor:
             filtered_entities.append(entity)
             valid_entity_names.add(entity.text)
 
-        # Filter relations to only include those between valid entities
-        filtered_relations = [
-            rel
-            for rel in result.relations
-            if rel.subject in valid_entity_names and rel.object in valid_entity_names
-        ]
+        # Keep all extracted relations; the KnowledgeGraph will handle node creation
+        filtered_relations = result.relations
 
         return ExtractionResult(
             entities=filtered_entities, relations=filtered_relations
