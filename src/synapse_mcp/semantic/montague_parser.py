@@ -249,35 +249,15 @@ class MontagueParser:
                         }
                     )
 
-        # Strategy 4: Compound and possessive patterns
-        for token in doc:
-            if token.dep_ in ["compound", "poss"] and token.head.pos_ in [
-                "NOUN",
-                "PROPN",
-            ]:
-                # Skip if both tokens belong to the same named entity span.
-                # Otherwise multi-word entities like "Hannaneh Hajishirzi" or
-                # "Common Ancestor" get fractured into two Entity nodes joined
-                # by a meaningless `modifies` edge.
-                if self._tokens_in_same_entity(doc, token, token.head):
-                    continue
-
-                subject = token.text
-                obj = token.head.text
-
-                if len(subject) > 2 and len(obj) > 2:  # Filter very short words
-                    relation_type = (
-                        "modifies" if token.dep_ == "compound" else "possesses"
-                    )
-                    relations.append(
-                        {
-                            "subject": subject,
-                            "predicate": relation_type,
-                            "object": obj,
-                            "confidence": 0.65,
-                            "source_span": f"{token.i}-{token.head.i}",
-                        }
-                    )
+        # Strategy 4 (compound/possessive patterns) was removed deliberately.
+        # In dependency-parser output, *most* compound and poss edges connect
+        # tokens like "purpose"->"general-purpose executor" or "scale"->
+        # "large-scale deployments" — these emit `modifies` edges that pollute
+        # the graph without carrying real semantic content. The LLM extractor
+        # captures genuine composition relationships (`is_component_of`,
+        # `instance_of`, etc.) with much better precision, so the right answer
+        # is to let those carry the signal and not duplicate them with a
+        # syntactic heuristic that's wrong far more often than it's right.
 
         # ----- Quality filter, same-sentence guard, and deduplication -----
         # The same-sentence guard catches relations whose endpoint tokens ended
@@ -404,21 +384,41 @@ class MontagueParser:
         return min(base_confidence, 1.0)
 
     def _normalize_entity_type(self, spacy_label: str) -> str:
-        """Normalize spaCy entity labels to our schema."""
+        """Normalize spaCy entity labels to our schema.
+
+        Covers all 18 default spaCy NER labels. Anything that falls through
+        becomes ``Entity`` (effectively untyped) — but everything in the
+        OntoNotes label set is mapped, so untyped entities should only
+        appear when a custom NER component emits a non-standard label.
+        """
         mapping = {
+            # People & organizations
             "PERSON": "Person",
             "ORG": "Organization",
-            "GPE": "Location",
-            "LOC": "Location",
+            "NORP": "Demographic",  # nationalities, religious or political groups
+            # Places
+            "GPE": "Location",  # countries, cities, states
+            "LOC": "Location",  # non-GPE locations (mountains, bodies of water)
+            "FAC": "Location",  # facilities, buildings, airports, highways
+            # Products & works
             "PRODUCT": "Product",
-            "EVENT": "Event",
             "WORK_OF_ART": "CreativeWork",
+            # Events & laws
+            "EVENT": "Event",
             "LAW": "Law",
+            # Languages
             "LANGUAGE": "Language",
+            # Temporal
             "DATE": "TemporalEntity",
             "TIME": "TemporalEntity",
+            # Numbers & quantities (all map to Quantity — they carry the
+            # same kind of semantic weight: a numeric or quantitative value)
             "MONEY": "MonetaryValue",
             "QUANTITY": "Quantity",
+            "PERCENT": "Quantity",
+            "CARDINAL": "Quantity",
+            "ORDINAL": "Quantity",
+            # Custom labels from our extended NER (if present)
             "CONCEPT": "Concept",
             "METHOD": "Method",
         }

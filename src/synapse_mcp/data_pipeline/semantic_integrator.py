@@ -250,8 +250,14 @@ class SemanticIntegrator:
                             break
 
                 if not endpoint_id:
+                    # This endpoint was named in a relation but never extracted
+                    # as a typed entity. Use a distinct ``UnresolvedReference``
+                    # type rather than the generic ``Concept`` so these stubs
+                    # are queryable and obviously distinguishable from genuine
+                    # concept nodes — and so we can later promote them to a
+                    # real type when we see better evidence for what they are.
                     endpoint_id = KnowledgeUtils.generate_entity_id(
-                        endpoint_name, "Concept"
+                        endpoint_name, "UnresolvedReference"
                     )
                     # If a previous document's merge step redirected this ID,
                     # the cache will hold the canonical entity dict at this
@@ -266,8 +272,8 @@ class SemanticIntegrator:
                         entity = {
                             "id": endpoint_id,
                             "name": endpoint_name,
-                            "type": "Concept",
-                            "confidence": 0.6,
+                            "type": "UnresolvedReference",
+                            "confidence": 0.4,
                             "source": source,
                             "properties": {
                                 "original_label": "",
@@ -559,6 +565,24 @@ class SemanticIntegrator:
                         remapped,
                     )
 
+            # Same MATCH-not-MERGE silent-drop applies to Fact MENTIONS edges:
+            # facts carry an ``entities`` list of entity IDs, and the storage
+            # query MATCHes both Fact and Entity. If the entity was consumed
+            # during merge, the MENTIONS edge silently disappears. Rewrite
+            # the fact entity lists the same way.
+            if id_remap and processed_data.get("facts"):
+                for fact in processed_data["facts"]:
+                    fact_ents = fact.get("entities") or []
+                    if fact_ents:
+                        fact["entities"] = [id_remap.get(eid, eid) for eid in fact_ents]
+                    # ``metadata.entities`` is the duplicated copy that gets
+                    # stored as a flat string property. Rewrite that too so
+                    # the stored value reflects canonical IDs.
+                    md = fact.get("metadata") or {}
+                    md_ents = md.get("entities")
+                    if isinstance(md_ents, list):
+                        md["entities"] = [id_remap.get(eid, eid) for eid in md_ents]
+
             # Cache hygiene: redirect consumed IDs in the cross-document cache
             # to point at canonical entities. Future docs that look up a name
             # matching a consumed entity will then find the canonical ID, and
@@ -601,9 +625,41 @@ class SemanticIntegrator:
 
         # Create basic facts from sentences if no semantic facts exist
         if not processed_data["facts"] and processed_data["sentences"]:
+            # Pre-build a (lowercased entity name -> id) lookup so we can attach
+            # MENTIONS edges to these basic facts by simple substring matching.
+            # Without this, fallback facts have ``entities=[]`` and never get
+            # linked to anything in the graph — they exist as orphaned text
+            # nodes, which kills queryability ("show me facts about X" finds
+            # nothing). Match is lowercase-substring; min length 3 to avoid
+            # matching pronouns and single letters.
+            name_to_id: list[tuple[str, str]] = sorted(
+                (
+                    (e["name"].lower(), e["id"])
+                    for e in processed_data["entities"]
+                    if len(e["name"]) >= 3
+                ),
+                key=lambda pair: len(pair[0]),
+                reverse=True,  # longer names first so they match before substrings
+            )
+
             for i, sentence in enumerate(processed_data["sentences"]):
                 if len(sentence.strip()) > 10:
-                    # Simplified fact structure with completely flattened metadata
+                    sentence_lower = sentence.lower()
+                    mentioned_ids: list[str] = []
+                    seen_spans: list[tuple[int, int]] = []
+                    for ent_name_lower, ent_id in name_to_id:
+                        idx = sentence_lower.find(ent_name_lower)
+                        if idx < 0:
+                            continue
+                        # Skip overlap with a longer match already recorded.
+                        span = (idx, idx + len(ent_name_lower))
+                        if any(
+                            not (span[1] <= s or e <= span[0]) for s, e in seen_spans
+                        ):
+                            continue
+                        seen_spans.append(span)
+                        mentioned_ids.append(ent_id)
+
                     fact = {
                         "id": f"{processed_data['text_id']}_fact_{i}",
                         "content": sentence,
@@ -612,9 +668,9 @@ class SemanticIntegrator:
                         "source": processed_data["source"],
                         "metadata": {
                             "extraction_method": "basic_sentence_split",
-                            "entities": "",  # Empty string for entity list
+                            "entities": mentioned_ids,
                         },
-                        "entities": [],  # Empty list for entity connections
+                        "entities": mentioned_ids,
                     }
                     processed_data["facts"].append(fact)
 
