@@ -96,7 +96,7 @@ class SemanticIntegrator:
                     try:
                         logger.info("Using LLM extractor for semantic analysis")
                         llm_result = await self.llm_extractor.extract_semantics(
-                            processed_data["cleaned_text"]
+                            processed_data["cleaned_text"], source_name=source
                         )
                         semantic_analysis = {
                             "entities": [e.model_dump() for e in llm_result.entities],

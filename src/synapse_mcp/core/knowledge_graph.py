@@ -20,13 +20,11 @@ from ..utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 # Embedding config — all local, no paid APIs
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIMENSION", "768"))
-EMBEDDING_MODEL = os.getenv(
-    "EMBEDDING_MODEL", "sentence-transformers/all-mpnet-base-v2"
-)
-# Set EMBEDDING_PROVIDER=ollama and OLLAMA_EMBED_MODEL=mxbai-embed-large to use Ollama
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "sentence-transformers")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "mxbai-embed-large")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIMENSION", "2560"))
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen2:7b")
+# Set EMBEDDING_PROVIDER=ollama and OLLAMA_EMBED_MODEL=qwen2:7b to use Ollama
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "ollama")
+OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "qwen2:7b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
