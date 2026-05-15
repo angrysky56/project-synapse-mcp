@@ -153,8 +153,8 @@ class MontagueParser:
 
                 # Get subject (prefer entity, fall back to noun chunk)
                 subject = self._find_entity_for_token(doc, token)
-                if not subject and token.i in noun_chunks:
-                    subject = noun_chunks[token.i]
+                if not subject:
+                    subject = self._get_chunk_endpoint(noun_chunks, token.i) or ""
 
                 if not subject:
                     continue
@@ -167,8 +167,8 @@ class MontagueParser:
                 for child in head.children:
                     if child.dep_ in ["dobj", "attr", "pobj"]:
                         obj = self._find_entity_for_token(doc, child)
-                        if not obj and child.i in noun_chunks:
-                            obj = noun_chunks[child.i]
+                        if not obj:
+                            obj = self._get_chunk_endpoint(noun_chunks, child.i)
                         if obj:
                             break
 
@@ -188,30 +188,36 @@ class MontagueParser:
             if token.lemma_ in ["be", "become", "equal", "represent", "constitute"]:
                 # Find subject
                 cop_subject: str | None = None
+                cop_subj_idx: int | None = None
                 for child in token.children:
                     if child.dep_ in ["nsubj", "nsubjpass"]:
-                        cop_subject = self._find_entity_for_token(doc, child)
-                        if not cop_subject and child.i in noun_chunks:
-                            cop_subject = noun_chunks[child.i]
+                        cop_subject = self._find_entity_for_token(doc, child) or None
+                        if not cop_subject:
+                            cop_subject = self._get_chunk_endpoint(noun_chunks, child.i)
+                        cop_subj_idx = child.i
                         break
 
                 # Find complement/attribute
                 cop_obj: str | None = None
+                cop_obj_idx: int | None = None
                 for child in token.children:
                     if child.dep_ in ["attr", "acomp", "dobj"]:
-                        cop_obj = self._find_entity_for_token(doc, child)
-                        if not cop_obj and child.i in noun_chunks:
-                            cop_obj = noun_chunks[child.i]
+                        cop_obj = self._find_entity_for_token(doc, child) or None
+                        if not cop_obj:
+                            cop_obj = self._get_chunk_endpoint(noun_chunks, child.i)
+                        cop_obj_idx = child.i
                         break
 
                 if cop_subject and cop_obj:
+                    span_lo = cop_subj_idx if cop_subj_idx is not None else token.i
+                    span_hi = cop_obj_idx if cop_obj_idx is not None else token.i
                     relations.append(
                         {
                             "subject": cop_subject,
                             "predicate": f"is-{token.lemma_}",
                             "object": cop_obj,
                             "confidence": 0.75,
-                            "source_span": f"{token.i}",
+                            "source_span": f"{span_lo}-{span_hi}",
                         }
                     )
 
@@ -220,16 +226,16 @@ class MontagueParser:
             if token.dep_ == "prep" and token.head.pos_ in ["NOUN", "PROPN", "VERB"]:
                 # Get the noun being modified
                 subject = self._find_entity_for_token(doc, token.head)
-                if not subject and token.head.i in noun_chunks:
-                    subject = noun_chunks[token.head.i]
+                if not subject:
+                    subject = self._get_chunk_endpoint(noun_chunks, token.head.i) or ""
 
                 # Get the object of the preposition
                 obj = None
                 for child in token.children:
                     if child.dep_ == "pobj":
                         obj = self._find_entity_for_token(doc, child)
-                        if not obj and child.i in noun_chunks:
-                            obj = noun_chunks[child.i]
+                        if not obj:
+                            obj = self._get_chunk_endpoint(noun_chunks, child.i)
                         break
 
                 if subject and obj:
@@ -249,6 +255,13 @@ class MontagueParser:
                 "NOUN",
                 "PROPN",
             ]:
+                # Skip if both tokens belong to the same named entity span.
+                # Otherwise multi-word entities like "Hannaneh Hajishirzi" or
+                # "Common Ancestor" get fractured into two Entity nodes joined
+                # by a meaningless `modifies` edge.
+                if self._tokens_in_same_entity(doc, token, token.head):
+                    continue
+
                 subject = token.text
                 obj = token.head.text
 
@@ -266,10 +279,26 @@ class MontagueParser:
                         }
                     )
 
-        # Quality filter and deduplication
+        # ----- Quality filter, same-sentence guard, and deduplication -----
+        # The same-sentence guard catches relations whose endpoint tokens ended
+        # up in different sentences. This shouldn't normally happen because
+        # the dependency parser is per-sentence, but malformed text (collapsed
+        # tables, lists, captions) can produce spurious cross-sentence links
+        # like "seven different retailers --relates-via-in--> the heart".
         filtered: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str]] = set()
         for rel in relations:
+            # Safely handle source_span which might be missing or of unexpected type
+            span_raw = rel.get("source_span", "")
+            if isinstance(span_raw, str) and "-" in span_raw:
+                try:
+                    t1_idx, t2_idx = (int(x) for x in span_raw.split("-", 1))
+                    if 0 <= t1_idx < len(doc) and 0 <= t2_idx < len(doc):
+                        if doc[t1_idx].sent.start != doc[t2_idx].sent.start:
+                            continue
+                except (ValueError, IndexError):
+                    pass  # if we can't parse the span, don't filter on it
+
             subj = str(rel["subject"])
             obj = str(rel["object"])
             pred = str(rel["predicate"])
@@ -772,7 +801,9 @@ class MontagueParser:
             if token.i >= ent.start and token.i < ent.end:
                 entity_text = ent.text
                 if not isinstance(entity_text, str):
-                    raise TypeError(f"Expected str for entity_text, got {type(entity_text)}")
+                    raise TypeError(
+                        f"Expected str for entity_text, got {type(entity_text)}"
+                    )
                 return entity_text
         return ""
 
@@ -1171,6 +1202,72 @@ class MontagueParser:
             return False
 
         return True
+
+    # ------------------------------------------------------------------
+    # Noun-chunk endpoint helpers (added 2026-05-14)
+    # ------------------------------------------------------------------
+    # The Montague extraction strategies fall back to spaCy's noun_chunks when
+    # a token isn't inside a named-entity span. Chunks come with determiners
+    # attached ("the essence", "a method"), which produced garbage Entity nodes
+    # like "the essence" --relates-via-of--> "open-ended phenomena". The next
+    # two helpers normalize a chunk before it becomes an endpoint.
+
+    # Determiners that prefix a noun chunk but aren't part of the named entity.
+    _LEADING_DETERMINERS = frozenset(
+        {
+            "the",
+            "a",
+            "an",
+            "this",
+            "that",
+            "these",
+            "those",
+            "some",
+            "any",
+            "such",
+            "another",
+            "every",
+            "each",
+            "all",
+            "both",
+            "either",
+            "neither",
+            "no",
+        }
+    )
+
+    @classmethod
+    def _strip_chunk_determiner(cls, chunk_text: str) -> str:
+        """Drop leading determiners from a noun-chunk string."""
+        tokens = chunk_text.strip().split()
+        while tokens and tokens[0].lower() in cls._LEADING_DETERMINERS:
+            tokens.pop(0)
+        return " ".join(tokens)
+
+    def _get_chunk_endpoint(self, noun_chunks: dict[int, str], idx: int) -> str | None:
+        """Return a determiner-stripped noun chunk at a token index, or None.
+
+        Returning None (rather than '') lets callers fall through naturally:
+        `subject = subject or self._get_chunk_endpoint(...)`.
+        """
+        if idx not in noun_chunks:
+            return None
+        stripped = self._strip_chunk_determiner(noun_chunks[idx])
+        return stripped if stripped else None
+
+    @staticmethod
+    def _tokens_in_same_entity(doc: Doc, t1: Token, t2: Token) -> bool:
+        """True if both tokens fall inside the same named-entity span.
+
+        Used to suppress compound/possessive relations between tokens that
+        belong to a single named entity (e.g. "Hannaneh Hajishirzi" or
+        "New York" — both PERSON/GPE spans where the spaCy compound dep
+        would otherwise emit a meaningless `modifies` edge between the parts).
+        """
+        for ent in doc.ents:
+            if (ent.start <= t1.i < ent.end) and (ent.start <= t2.i < ent.end):
+                return True
+        return False
 
     def _extract_svo_pattern(
         self, sent: Span

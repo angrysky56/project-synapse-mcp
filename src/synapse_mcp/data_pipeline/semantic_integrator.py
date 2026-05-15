@@ -473,9 +473,17 @@ class SemanticIntegrator:
         # 0b. Strip YAML frontmatter
         text = re.sub(r"^---\s*\n.*?\n---", " ", text, flags=re.MULTILINE | re.DOTALL)
 
-        # 0c. Remove table rows and wiki-table syntax
-        text = re.sub(r"^\|.*\|$", " ", text, flags=re.MULTILINE)  # table rows
-        text = re.sub(r"^[=|-]{3,}$", " ", text, flags=re.MULTILINE)  # table separators
+        # 0c. Remove table rows and wiki-table syntax, replacing with a sentence
+        # break so spaCy's sentence splitter doesn't merge a stripped table cell
+        # into adjacent prose — that was producing spurious cross-sentence
+        # relations like "seven different retailers --in--> the heart".
+        text = re.sub(r"^\|.*\|$", ". ", text, flags=re.MULTILINE)  # table rows
+        text = re.sub(r"^[=|-]{3,}$", ". ", text, flags=re.MULTILINE)  # separators
+
+        # 0d. Markdown list markers — convert leading bullet/number to a
+        # sentence break for the same reason as table rows above.
+        text = re.sub(r"^\s*[-*+]\s+", ". ", text, flags=re.MULTILINE)  # bullets
+        text = re.sub(r"^\s*\d+\.\s+", ". ", text, flags=re.MULTILINE)  # numbered
 
         # 1. Remove HTML tags but keep content (basic stripping)
         text = re.sub(r"</?[a-zA-Z][^>]*>", "", text)

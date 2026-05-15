@@ -8,6 +8,7 @@ Upgraded for Neo4j 2026.x with:
   - db.create.setNodeVectorProperty for efficient vector storage
 """
 
+import asyncio
 import os
 from typing import Any, cast
 
@@ -53,7 +54,22 @@ class KnowledgeGraph:
         """Establish connection to Neo4j database."""
         try:
             driver = AsyncGraphDatabase.driver(
-                self.uri, auth=(self.user, self.password)
+                self.uri,
+                auth=(self.user, self.password),
+                # Recycle pool connections before NAT/OS idle reapers kill them.
+                # Default is 3600s; 1800s leaves comfortable headroom.
+                max_connection_lifetime=30 * 60,
+                # Cap concurrent connections per process. Default 100; 50 is plenty
+                # for a single MCP server and keeps us friendly to Neo4j.
+                max_connection_pool_size=50,
+                # Fail fast instead of stalling 60s when the pool is wedged.
+                connection_acquisition_timeout=30,
+                # THE fix for "connection doesn't stay alive": ping any connection
+                # that has been idle >30s before reusing it. Without this, dead
+                # sockets sit in the pool and the next query hangs indefinitely.
+                liveness_check_timeout=30,
+                # Explicit TCP keepalive (default true; making it intentional).
+                keep_alive=True,
             )
             self.driver = driver
             await self.check_health()
@@ -144,23 +160,41 @@ class KnowledgeGraph:
                 {analyzer: 'standard-no-stop-words'})""",
         ]
 
-        async with self.driver.session(database=self.database) as session:
-            for query in cleanup_queries:
-                try:
-                    await session.run(query)
-                except Exception as e:
-                    logger.warning(f"Cleanup query skipped: {e}")
-            for query in schema_queries + vector_queries:
-                try:
-                    await session.run(query)
-                except Exception as e:
-                    logger.warning(f"Schema query skipped: {e}")
-            for query in fulltext_queries:
-                try:
-                    await session.run(query)
-                except Exception as e:
-                    if "already exists" not in str(e).lower():
-                        logger.warning(f"Fulltext index skipped: {e}")
+        # Each schema query runs in its own session with a 15s asyncio timeout.
+        # Rationale: schema operations need an exclusive schema lock cluster-wide.
+        # If another Synapse instance is mid-init, it holds that lock and this
+        # call would block forever. Sharing one session across queries would
+        # also wedge every subsequent query. Per-query session + asyncio.wait_for
+        # lets us abandon a blocked query and move on — by the time we finish,
+        # the other instance will have finished and the constraints/indexes
+        # we "skipped" will already exist anyway (they all use IF NOT EXISTS).
+        async def _run(query: str) -> None:
+            assert self.driver is not None
+            async with self.driver.session(database=self.database) as session:
+                await session.run(query)
+
+        async def _try(query: str, label: str) -> None:
+            try:
+                await asyncio.wait_for(_run(query), timeout=15)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"{label} timed out (likely concurrent schema init held lock): "
+                    f"{query[:80]}..."
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                # Idempotent "noise" we don't want to log loudly.
+                if any(s in msg for s in ("already exists", "equivalent")):
+                    logger.debug(f"{label} already applied: {query[:80]}...")
+                else:
+                    logger.warning(f"{label} failed: {e}")
+
+        for q in cleanup_queries:
+            await _try(q, "Cleanup query")
+        for q in schema_queries + vector_queries:
+            await _try(q, "Schema query")
+        for q in fulltext_queries:
+            await _try(q, "Fulltext index")
         logger.info("Schema initialisation complete")
 
     # ------------------------------------------------------------------
@@ -179,14 +213,12 @@ class KnowledgeGraph:
     @logger.timer()
     async def _embed_text(self, text: str) -> list[float]:
         """Generate embedding locally. Supports sentence-transformers or Ollama."""
-        import asyncio
-
         if EMBEDDING_PROVIDER == "ollama":
             return await self._embed_via_ollama(text)
 
         # Default: sentence-transformers (runs on GPU if available)
         model = self._get_local_embedder()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         vec = await loop.run_in_executor(None, model.encode, text)
         return cast(list[float], vec.tolist())
 
@@ -196,17 +228,18 @@ class KnowledgeGraph:
 
         url = f"{OLLAMA_BASE_URL}/api/embed"
         payload = {"model": OLLAMA_EMBED_MODEL, "input": text}
+        # Bound the request so a dead Ollama doesn't hang the whole pipeline
+        # (aiohttp's default total timeout is 5 minutes).
+        timeout = aiohttp.ClientTimeout(total=30, connect=5)
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, json=payload) as resp:
                     data = await resp.json()
                     return cast(list[float], data["embeddings"][0])
         except Exception as e:
             logger.warning(f"Ollama embed failed, falling back to local: {e}")
-            import asyncio
-
             model = self._get_local_embedder()
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             vec = await loop.run_in_executor(None, model.encode, text)
             return cast(list[float], vec.tolist())
 
