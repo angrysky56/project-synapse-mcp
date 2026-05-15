@@ -100,7 +100,11 @@ class LlmExtractor:
             "options": {
                 "temperature": 0.0,
                 "num_ctx": 131072,  # Full 128K context for Gemma 4
-                "num_predict": 4096,
+                # 4096 was truncating output mid-relations on big docs (e.g. an
+                # Eris-mythology article with ~190 entities), leaving the
+                # 'relations' field empty after JSON parse. 16384 gives plenty
+                # of room for entity-dense documents while still being capped.
+                "num_predict": 16384,
                 "num_keep": -1,  # Keep the system instructions in KV cache
                 "top_k": 1,
                 "top_p": 0.1,
@@ -176,6 +180,20 @@ class LlmExtractor:
                             raise je
 
                         raw_result = ExtractionResult.model_validate(data)
+                        if not raw_result.relations:
+                            # Visibility: knowing whether the model produced
+                            # zero relations vs. produced some that failed
+                            # validation is the difference between "Gemma is
+                            # being weird about this text" and "our schema is
+                            # too strict". Log content size + entity count
+                            # for triage.
+                            logger.info(
+                                "LLM extraction returned 0 relations "
+                                "(entities=%d, content_chars=%d). Source preview: %s",
+                                len(raw_result.entities),
+                                len(content),
+                                content[:200].replace("\n", " "),
+                            )
                         return self._sanitize_results(raw_result)
             except (
                 aiohttp.ClientError,

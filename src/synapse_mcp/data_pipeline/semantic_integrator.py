@@ -122,6 +122,27 @@ class SemanticIntegrator:
                                     montague_analysis.get("entities", []),
                                 )
                             )
+                            # Relation fallback: if the LLM produced no relations
+                            # (output truncated by num_predict, model behavior,
+                            # silent parse failure...), supplement with Montague's
+                            # relations rather than losing them entirely. This
+                            # keeps the graph connected even when Gemma punts on
+                            # the relations field — quality drops to "decent"
+                            # Montague output instead of "empty".
+                            if not semantic_analysis["relations"]:
+                                montague_relations = montague_analysis.get(
+                                    "relations", []
+                                )
+                                if montague_relations:
+                                    logger.info(
+                                        "LLM returned 0 relations for '%s' "
+                                        "(entities=%d); falling back to %d "
+                                        "Montague relations.",
+                                        source,
+                                        len(semantic_analysis["entities"]),
+                                        len(montague_relations),
+                                    )
+                                    semantic_analysis["relations"] = montague_relations
                         except Exception as me:
                             logger.warning("Hybrid Montague pass failed: %s", me)
 
@@ -232,7 +253,16 @@ class SemanticIntegrator:
                     endpoint_id = KnowledgeUtils.generate_entity_id(
                         endpoint_name, "Concept"
                     )
-                    if endpoint_id not in self.entity_cache:
+                    # If a previous document's merge step redirected this ID,
+                    # the cache will hold the canonical entity dict at this
+                    # key. Reuse the canonical ID so the relation points at a
+                    # real stored Neo4j node instead of a consumed-and-dropped
+                    # ghost — closes the cross-document edge-leak path.
+                    if endpoint_id in self.entity_cache:
+                        cached = self.entity_cache[endpoint_id]
+                        if cached.get("id") and cached["id"] != endpoint_id:
+                            endpoint_id = cached["id"]
+                    elif endpoint_id not in self.entity_cache:
                         entity = {
                             "id": endpoint_id,
                             "name": endpoint_name,
@@ -424,19 +454,31 @@ class SemanticIntegrator:
             return None
 
     @logger.timer()
-    async def _merge_entities_by_name(self, entities: list[dict]) -> list[dict]:
+    async def _merge_entities_by_name(
+        self, entities: list[dict]
+    ) -> tuple[list[dict], dict[str, str]]:
         """Merge entities that share the same normalized name or where one is a substring of another.
 
         Fixes name fragmentation: e.g., 'Amirhossein' and 'Amirhossein Kazemnejad'
         get merged into the longer form (higher-confidence / longer name wins).
+
+        Returns:
+            (merged_entities, consumed_to_canonical_id_map)
+            The map lets callers rewrite relation endpoints that pointed to the
+            consumed (shorter) entity so they point to the surviving canonical
+            entity. Without this rewrite, ``_store_relationship`` silently drops
+            edges because its Cypher uses MATCH (not MERGE) on endpoint IDs.
         """
         if not entities:
-            return entities
+            return entities, {}
 
         # Sort by name length descending so longer names are kept as canonical
         sorted_entities = sorted(entities, key=lambda e: len(e["name"]), reverse=True)
         merged: list[dict] = []
         consumed_ids: set[str] = set()
+        # Maps consumed entity ID -> surviving canonical ID. Used by the caller
+        # to rewrite relation endpoints so the edges don't get orphaned.
+        consumed_to_canonical: dict[str, str] = {}
 
         for i, entity in enumerate(sorted_entities):
             if entity["id"] in consumed_ids:
@@ -455,10 +497,11 @@ class SemanticIntegrator:
                         canonical["confidence"] = other["confidence"]
                     # Prefer the longer name's type, but allow type upgrades
                     consumed_ids.add(other["id"])
+                    consumed_to_canonical[other["id"]] = canonical["id"]
 
             merged.append(canonical)
 
-        return merged
+        return merged, consumed_to_canonical
 
     async def _hybrid_entity_merge(
         self, llm_entities: list[dict[str, Any]], spacy_entities: list[dict[str, Any]]
@@ -490,9 +533,43 @@ class SemanticIntegrator:
         """Post-process extracted data for validation and cleanup."""
         # FIX Bug 2: Merge fragmented entities before deduplication
         if processed_data["entities"]:
-            processed_data["entities"] = await self._merge_entities_by_name(
+            processed_data["entities"], id_remap = await self._merge_entities_by_name(
                 processed_data["entities"]
             )
+
+            # Rewrite relation endpoints that pointed to entities just consumed
+            # by the merge step. Without this, ``_store_relationship`` would
+            # silently drop the edge: its Cypher uses MATCH (not MERGE) on the
+            # endpoint IDs, so a relation pointing to a no-longer-stored entity
+            # produces no rows and no error — the edge just never gets written.
+            if id_remap and processed_data.get("relationships"):
+                remapped = 0
+                for rel in processed_data["relationships"]:
+                    new_src = id_remap.get(rel["source_id"])
+                    if new_src and new_src != rel["source_id"]:
+                        rel["source_id"] = new_src
+                        remapped += 1
+                    new_tgt = id_remap.get(rel["target_id"])
+                    if new_tgt and new_tgt != rel["target_id"]:
+                        rel["target_id"] = new_tgt
+                        remapped += 1
+                if remapped:
+                    logger.debug(
+                        "Remapped %d relation endpoints after entity merge",
+                        remapped,
+                    )
+
+            # Cache hygiene: redirect consumed IDs in the cross-document cache
+            # to point at canonical entities. Future docs that look up a name
+            # matching a consumed entity will then find the canonical ID, and
+            # relations referencing the consumed ID via cache will still resolve
+            # to a node that actually got stored in Neo4j.
+            if id_remap:
+                canonical_by_id = {e["id"]: e for e in processed_data["entities"]}
+                for consumed_id, canonical_id in id_remap.items():
+                    canonical_entity = canonical_by_id.get(canonical_id)
+                    if canonical_entity is not None:
+                        self.entity_cache[consumed_id] = canonical_entity
 
         # Deduplicate entities by ID
         unique_entities: dict[str, dict[str, Any]] = {}
