@@ -150,14 +150,14 @@ class KnowledgeGraph:
                 }}}}""",
         ]
 
-        # Fulltext indexes for BM25 keyword search
+        # Fulltext indexes for BM25 keyword search (Neo4j 5.x syntax)
         fulltext_queries = [
-            """CALL db.index.fulltext.createNodeIndex(
-                'entity_fulltext', ['Entity'], ['name', 'type'],
-                {analyzer: 'standard-no-stop-words'})""",
-            """CALL db.index.fulltext.createNodeIndex(
-                'fact_fulltext', ['Fact'], ['content'],
-                {analyzer: 'standard-no-stop-words'})""",
+            """CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS
+               FOR (n:Entity) ON EACH [n.name, n.type]
+               OPTIONS { indexConfig: { `fulltext.analyzer`: 'standard-no-stop-words' } }""",
+            """CREATE FULLTEXT INDEX fact_fulltext IF NOT EXISTS
+               FOR (n:Fact) ON EACH [n.content]
+               OPTIONS { indexConfig: { `fulltext.analyzer`: 'standard-no-stop-words' } }""",
         ]
 
         # Each schema query runs in its own session with a 15s asyncio timeout.
@@ -245,6 +245,24 @@ class KnowledgeGraph:
 
     # ------------------------------------------------------------------
     # Store operations
+    @logger.timer()
+    async def purge_all(self) -> dict[str, int]:
+        """Purge all nodes and relationships from the knowledge graph."""
+        if self.driver is None:
+            raise RuntimeError("Driver not initialized.")
+
+        async with self.driver.session(database=self.database) as session:
+            # Delete everything
+            result = await session.run("MATCH (n) DETACH DELETE n")
+            summary = await result.consume()
+
+            stats = {
+                "nodes_deleted": summary.counters.nodes_deleted,
+                "relationships_deleted": summary.counters.relationships_deleted,
+            }
+            logger.info(f"Purged knowledge graph: {stats}")
+            return stats
+
     # ------------------------------------------------------------------
 
     @logger.timer()

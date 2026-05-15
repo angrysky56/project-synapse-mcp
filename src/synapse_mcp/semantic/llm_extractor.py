@@ -65,20 +65,30 @@ class LlmExtractor:
         Returns:
             An ExtractionResult containing discovered entities and relations.
         """
-        prompt = (
-            "Extract entities and relations from the following text. "
-            "Return the result as a JSON object with 'entities' and 'relations' keys. "
-            "Entities should have 'text', 'type', 'confidence' (0-1), and 'properties'. "
-            "Relations should have 'subject', 'object', 'predicate', 'confidence', and 'source_span'."
-            f"\n\nText: {text}"
+        extraction_instructions = (
+            "You are an expert knowledge extraction agent. Your task is to extract "
+            "high-signal entities and their semantic relationships from the provided text.\n\n"
+            "CRITICAL CONSTRAINTS:\n"
+            "1. Focus ONLY on core technical, conceptual, or factual knowledge.\n"
+            "2. DO NOT extract: navigation labels, UI button text, citation counts, "
+            "download counts, 'HuggingFace' page furniture, or page metadata.\n"
+            "3. DO NOT extract: generic fragments like 'the article' or 'this model'.\n"
+            "4. Relationship types must be specific and descriptive (e.g., 'trained_on', 'achieves_performance').\n"
+            "5. Use consistent, snake_case or SCREAMING_SNAKE_CASE for entity types.\n"
+            "6. If the text contains URLs, DO NOT extract them as entities unless they are primary subjects.\n\n"
+            "OUTPUT FORMAT: Return a JSON object with:\n"
+            "- 'entities': list of { 'text': str, 'type': str, 'confidence': float }\n"
+            "- 'relations': list of { 'subject': str, 'object': str, 'predicate': str, 'confidence': float }"
         )
+
+        prompt = f"Extract knowledge from the following text:\n\n{text}"
 
         payload = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "Assistant extracts semantic information in JSON format.",
+                    "content": extraction_instructions,
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -105,7 +115,8 @@ class LlmExtractor:
                         result_json = await response.json()
                         content = result_json.get("message", {}).get("content", "{}")
                         data = json.loads(content)
-                        return ExtractionResult.model_validate(data)
+                        raw_result = ExtractionResult.model_validate(data)
+                        return self._sanitize_results(raw_result)
             except (
                 aiohttp.ClientError,
                 json.JSONDecodeError,
@@ -122,3 +133,57 @@ class LlmExtractor:
                     return ExtractionResult()
 
         return ExtractionResult()
+
+    def _sanitize_results(self, result: ExtractionResult) -> ExtractionResult:
+        """Filter out low-signal entities and furniture leakage."""
+        junk_types = {"LINK", "NAV_METADATA", "UI_LABEL", "METADATA"}
+        junk_names = {
+            "citation downloads",
+            "dataset",
+            "files",
+            "community",
+            "settings",
+            "inference providers",
+            "downloads",
+            "last month",
+        }
+
+        filtered_entities = []
+        valid_entity_names = set()
+
+        for entity in result.entities:
+            name_lower = entity.text.lower().strip()
+
+            # Skip junk types
+            if entity.type.upper() in junk_types:
+                continue
+
+            # Skip pure numbers or single characters
+            if name_lower.isdigit() or len(name_lower) < 2:
+                continue
+
+            # Skip common UI headers
+            if name_lower in junk_names:
+                continue
+
+            # Skip obvious UI fragments (e.g., "about 24", "8192 4096")
+            if (
+                any(char.isdigit() for char in name_lower)
+                and len(name_lower.split()) < 3
+                and not any(c.isalpha() for c in name_lower)
+            ):
+                continue
+
+            filtered_entities.append(entity)
+            valid_entity_names.add(entity.text)
+
+        # Filter relations to only include those between valid entities
+        filtered_relations = [
+            rel
+            for rel in result.relations
+            if rel.subject in valid_entity_names and rel.object in valid_entity_names
+        ]
+
+        return ExtractionResult(
+            entities=filtered_entities, relations=filtered_relations
+        )

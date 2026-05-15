@@ -16,7 +16,7 @@ import signal
 import subprocess
 import sys
 import traceback
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -173,7 +173,7 @@ synapse_server = SynapseServer()
 
 
 @asynccontextmanager
-async def lifespan_context(_mcp_app: FastMCP) -> AsyncIterator[dict[str, Any]]:
+async def lifespan_context(_mcp_app: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
     """Manage server lifecycle with proper cleanup."""
     logger.info("Starting Project Synapse MCP server")
 
