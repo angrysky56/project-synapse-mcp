@@ -181,12 +181,20 @@ async def lifespan_context(_mcp_app: FastMCP) -> AsyncIterator[dict[str, Any]]:
         # Initialize server
         await synapse_server.initialize()
 
-        # Start background insight generation if insight_engine is initialized
+        # Start background insight generation if insight_engine is initialized and enabled
         if synapse_server.insight_engine is not None:
-            insight_task = asyncio.create_task(
-                synapse_server.insight_engine.start_autonomous_processing()
-            )
-            synapse_server.background_tasks.add(insight_task)
+            if os.getenv("SYNAPSE_AUTONOMOUS_INSIGHTS", "off").lower() == "on":
+                insight_task = asyncio.create_task(
+                    synapse_server.insight_engine.start_autonomous_processing()
+                )
+                synapse_server.background_tasks.add(insight_task)
+                logger.info(
+                    "Autonomous insight engine started (SYNAPSE_AUTONOMOUS_INSIGHTS=on)"
+                )
+            else:
+                logger.info(
+                    "Autonomous insight engine disabled by default (SYNAPSE_AUTONOMOUS_INSIGHTS=off)"
+                )
 
         yield {"synapse": synapse_server}
 

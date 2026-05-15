@@ -6,12 +6,14 @@ a complete semantic analysis pipeline.
 """
 
 import hashlib
+import os
 import re
 import string
 from datetime import datetime
 from typing import Any
 
 from ..knowledge.knowledge_types import KnowledgeUtils
+from ..semantic.llm_extractor import LlmExtractor
 from ..semantic.montague_parser import MontagueParser
 from ..utils.logging_config import get_logger
 
@@ -26,21 +28,35 @@ class SemanticIntegrator:
     a unified semantic analysis pipeline that extracts entities, relationships, and facts.
     """
 
-    def __init__(self, montague_parser: MontagueParser | None = None) -> None:
+    def __init__(
+        self,
+        montague_parser: MontagueParser | None = None,
+        llm_extractor: LlmExtractor | None = None,
+    ) -> None:
         """Initialize the semantic integrator."""
         self.montague_parser = montague_parser
+        self.llm_extractor = llm_extractor
+        self.extraction_provider = "montague"
         self.entity_cache: dict[str, dict[str, Any]] = {}  # Cache for deduplication
         self.logger = logger
 
     @logger.timer()
     async def initialize(self) -> None:
         """Initialize the semantic integrator with required components."""
+        self.extraction_provider = os.getenv("EXTRACTION_PROVIDER", "montague").lower()
+
         if self.montague_parser is None:
             self.montague_parser = MontagueParser()
 
+        if self.llm_extractor is None and self.extraction_provider == "llm":
+            self.llm_extractor = LlmExtractor()
+
         try:
             await self.montague_parser.initialize()
-            logger.info("Semantic integrator initialized successfully")
+            logger.info(
+                "Semantic integrator initialized with provider: %s",
+                self.extraction_provider,
+            )
         except Exception as e:
             logger.warning(
                 "Montague parser initialization failed: %s", e, exc_info=True
@@ -73,12 +89,59 @@ class SemanticIntegrator:
         # Add semantic analysis if Montague parser is available
         if self.montague_parser and self.montague_parser.nlp:
             try:
-                semantic_analysis = await self.montague_parser.parse_text(
-                    processed_data["cleaned_text"]
-                )
-                await self._integrate_semantic_analysis(
-                    processed_data, semantic_analysis, source
-                )
+                semantic_analysis = None
+
+                # 1. Try LLM Provider if selected
+                if self.extraction_provider == "llm" and self.llm_extractor:
+                    try:
+                        logger.info("Using LLM extractor for semantic analysis")
+                        llm_result = await self.llm_extractor.extract_semantics(
+                            processed_data["cleaned_text"]
+                        )
+                        semantic_analysis = {
+                            "entities": [e.model_dump() for e in llm_result.entities],
+                            "relations": [r.model_dump() for r in llm_result.relations],
+                            "propositions": [],
+                        }
+
+                        # Hybrid Merge: Still run Montague for logical forms and spaCy NER
+                        try:
+                            montague_analysis = await self.montague_parser.parse_text(
+                                processed_data["cleaned_text"]
+                            )
+                            semantic_analysis["propositions"] = montague_analysis.get(
+                                "propositions", []
+                            )
+                            semantic_analysis["semantic_features"] = (
+                                montague_analysis.get("semantic_features", {})
+                            )
+                            # Merge spaCy entities with LLM results
+                            semantic_analysis["entities"] = (
+                                await self._hybrid_entity_merge(
+                                    semantic_analysis["entities"],
+                                    montague_analysis.get("entities", []),
+                                )
+                            )
+                        except Exception as me:
+                            logger.warning("Hybrid Montague pass failed: %s", me)
+
+                    except Exception as le:
+                        logger.warning(
+                            "LLM extraction failed, falling back to pure Montague: %s",
+                            le,
+                        )
+                        semantic_analysis = None  # Trigger fallback below
+
+                # 2. Fallback to (or primary use of) Montague
+                if semantic_analysis is None:
+                    semantic_analysis = await self.montague_parser.parse_text(
+                        processed_data["cleaned_text"]
+                    )
+
+                if semantic_analysis:
+                    await self._integrate_semantic_analysis(
+                        processed_data, semantic_analysis, source
+                    )
             except Exception as e:
                 logger.warning(
                     "Semantic analysis failed for source '%s', continuing with basic processing: %s",
@@ -394,6 +457,32 @@ class SemanticIntegrator:
                     consumed_ids.add(other["id"])
 
             merged.append(canonical)
+
+        return merged
+
+    async def _hybrid_entity_merge(
+        self, llm_entities: list[dict[str, Any]], spacy_entities: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """
+        Merge entities from LLM and spaCy, preferring LLM but keeping unique spaCy ones.
+        """
+        # Start with LLM entities
+        merged = list(llm_entities)
+        llm_names = {e["text"].lower() for e in llm_entities}
+
+        for se in spacy_entities:
+            se_text = se["text"].lower()
+            # If spaCy found something the LLM missed, add it
+            if se_text not in llm_names:
+                # Check if it's a substring or superstring of any LLM entity
+                is_redundant = False
+                for ln in llm_names:
+                    if se_text in ln or ln in se_text:
+                        is_redundant = True
+                        break
+
+                if not is_redundant:
+                    merged.append(se)
 
         return merged
 

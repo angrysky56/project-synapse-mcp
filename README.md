@@ -66,6 +66,7 @@ Web / Raw Sources
 - Hybrid search (vector + BM25 score fusion)
 - Graph traversal for discovering hidden relationships
 - Montague Grammar parser for formal semantic analysis
+- **Hybrid Extraction Pipeline**: Merges LLM-based extraction (Gemma 2 9b via Ollama) with spaCy NER for high-precision entity and relationship discovery
 - Zettelkasten engine for autonomous insight generation
 
 ### LLM-WIKI Integration
@@ -158,6 +159,11 @@ NEO4J_DATABASE=neo4j
 EMBEDDING_PROVIDER=sentence-transformers  # or "ollama"
 EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2
 EMBEDDING_DIMENSION=768
+
+# Extraction — Montague (default) or "llm" (hybrid)
+EXTRACTION_PROVIDER=montague
+OLLAMA_EXTRACTION_MODEL=gemma2:9b
+OLLAMA_TIMEOUT=120
 
 # Wiki vault
 WIKI_VAULT_PATH=/path/to/your/obsidian-vault

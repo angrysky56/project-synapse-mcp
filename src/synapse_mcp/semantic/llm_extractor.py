@@ -1,0 +1,124 @@
+"""LLM-based semantic extraction module."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from typing import Any
+
+import aiohttp
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+
+class ExtractedEntity(BaseModel):
+    """Semantic entity extracted from text."""
+
+    text: str
+    type: str
+    confidence: float
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtractedRelation(BaseModel):
+    """Semantic relation extracted from text."""
+
+    subject: str
+    object: str
+    predicate: str
+    confidence: float
+    source_span: str | None = None
+
+
+class ExtractionResult(BaseModel):
+    """Container for semantic extraction results."""
+
+    entities: list[ExtractedEntity] = Field(default_factory=list)
+    relations: list[ExtractedRelation] = Field(default_factory=list)
+
+
+class LlmExtractor:
+    """Extractor that uses an LLM to identify entities and relations."""
+
+    base_url: str
+    model: str
+    api_url: str
+
+    def __init__(self, base_url: str | None = None, model: str | None = None) -> None:
+        """Initialize the extractor with base URL and model name."""
+        self.base_url = (
+            base_url or os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434"
+        )
+        self.model = model or os.getenv("OLLAMA_EXTRACTION_MODEL") or "gemma4:latest"
+        self.api_url = f"{self.base_url.rstrip('/')}/api/chat"
+
+    async def extract_semantics(self, text: str) -> ExtractionResult:
+        """
+        Extract entities and relations from text using an LLM.
+
+        Args:
+            text: The raw text to analyze.
+
+        Returns:
+            An ExtractionResult containing discovered entities and relations.
+        """
+        prompt = (
+            "Extract entities and relations from the following text. "
+            "Return the result as a JSON object with 'entities' and 'relations' keys. "
+            "Entities should have 'text', 'type', 'confidence' (0-1), and 'properties'. "
+            "Relations should have 'subject', 'object', 'predicate', 'confidence', and 'source_span'."
+            f"\n\nText: {text}"
+        )
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Assistant extracts semantic information in JSON format.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+            "format": "json",
+        }
+
+        # Use a generous default for local models, configurable via env
+        env_timeout = int(os.getenv("OLLAMA_TIMEOUT", "120"))
+        timeout = aiohttp.ClientTimeout(total=env_timeout)
+        for attempt in range(2):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(self.api_url, json=payload) as response:
+                        if response.status >= 400:
+                            error_text = await response.text()
+                            logger.warning(
+                                "Ollama API returned error %d: %s",
+                                response.status,
+                                error_text,
+                            )
+                            response.raise_for_status()
+
+                        result_json = await response.json()
+                        content = result_json.get("message", {}).get("content", "{}")
+                        data = json.loads(content)
+                        return ExtractionResult.model_validate(data)
+            except (
+                aiohttp.ClientError,
+                json.JSONDecodeError,
+                ValueError,
+                asyncio.TimeoutError,
+            ) as e:
+                logger.warning("Extraction attempt %d failed: %s", attempt + 1, e)
+                if attempt == 1:
+                    logger.error(
+                        "All extraction attempts failed for text: %s...", text[:50]
+                    )
+                    # We don't want to crash the whole pipeline if LLM fails,
+                    # so we return an empty result and let the integrator fallback.
+                    return ExtractionResult()
+
+        return ExtractionResult()

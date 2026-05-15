@@ -92,7 +92,7 @@ class InsightEngine:
         self.graph = nx.DiGraph()
         self.vectorizer = TfidfVectorizer(max_features=1000, stop_words="english")
         self.is_running = False
-        self.processing_interval = 300  # 5 minutes
+        self.processing_interval = int(os.getenv("PATTERN_DETECTION_INTERVAL", "300"))
 
         # Insight generation settings
         self.confidence_threshold = float(
@@ -117,9 +117,30 @@ class InsightEngine:
         logger.info("Insight engine cleanup completed")
 
     async def start_autonomous_processing(self) -> None:
-        """Start autonomous insight generation in background."""
+        """Start autonomous insight generation in background.
+
+        Note on startup delay: ``_autonomous_processing_cycle`` is heavy
+        (graph-wide NetworkX analysis on every node + edge). If it fires
+        immediately when the MCP server starts, the event loop stays saturated
+        long enough that the MCP stdio reader can't keep up with the client,
+        the client decides the server is dead, and the connection drops with
+        ``anyio.BrokenResourceError``. The initial sleep lets the server
+        finish its handshake and serve a few requests cleanly before insight
+        work begins competing for the event loop.
+        """
         self.is_running = True
         logger.info("Starting autonomous insight processing")
+
+        initial_delay = int(os.getenv("SYNAPSE_INSIGHT_STARTUP_DELAY", "120"))
+        if initial_delay > 0:
+            logger.info(
+                f"First insight cycle will run after {initial_delay}s startup delay"
+            )
+            try:
+                await asyncio.sleep(initial_delay)
+            except asyncio.CancelledError:
+                logger.info("Autonomous processing cancelled before first cycle")
+                return
 
         while self.is_running:
             try:
