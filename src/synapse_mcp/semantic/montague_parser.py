@@ -16,6 +16,7 @@ import spacy  # type: ignore[import-untyped]
 from spacy.language import Language  # type: ignore[import-untyped]
 from spacy.tokens import Doc, Span, Token  # type: ignore[import-untyped]
 
+from ..knowledge.knowledge_types import KnowledgeUtils
 from ..utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -132,7 +133,12 @@ class MontagueParser:
                     "start": ent.start_char,
                     "end": ent.end_char,
                     "confidence": confidence,
-                    "id": self._generate_entity_id(ent.text, ent.label_),
+                    # Generate the ID using the same function + same NORMALIZED
+                    # type the storage layer uses, so the IDs match across the
+                    # entity-storage path and the proposition path. Using the
+                    # raw spaCy label here would diverge from the canonical
+                    # ``organization_*`` form and silently break MENTIONS.
+                    "id": KnowledgeUtils.generate_entity_id(ent.text, entity_type),
                 }
             )
 
@@ -349,11 +355,22 @@ class MontagueParser:
             ]
 
             if entities_in_sent:
+                # IMPORTANT: This list of entity IDs must match the IDs that
+                # are produced when the same entity is stored. The storage
+                # path uses ``KnowledgeUtils.generate_entity_id(name, type)``
+                # with the NORMALIZED type (e.g. "Organization"). Using
+                # spaCy's raw label here (e.g. "ORG") would produce a
+                # different ID (``org_*`` vs ``organization_*``) and cause
+                # ``_store_fact``'s MATCH-on-id to silently drop every
+                # MENTIONS edge — exactly the bug that left thousands of
+                # entities orphaned in earlier runs.
                 proposition = {
                     "id": f"prop_{sent.start}_{sent.end}",
                     "content": sent.text.strip(),
                     "entities": [
-                        self._generate_entity_id(ent.text, ent.label_)
+                        KnowledgeUtils.generate_entity_id(
+                            ent.text, self._normalize_entity_type(ent.label_)
+                        )
                         for ent in entities_in_sent
                     ],
                     "confidence": 0.9,  # High confidence for direct extraction
@@ -426,9 +443,44 @@ class MontagueParser:
         return mapping.get(spacy_label, "Entity")
 
     @staticmethod
+    def _looks_like_code_symbol(text: str) -> bool:
+        """Detect identifiers that look like programming-language symbols.
+
+        spaCy mislabels these as Organization or Product. We catch only HIGH-
+        CONFIDENCE patterns so we don't reroute legitimate brand names:
+
+        - snake_case (contains an underscore between alphanumerics)
+        - SCREAMING_SNAKE_CASE (same, all caps)
+        - CamelCase with >=2 internal capitals (catches FindOppositeSwing,
+          IsSwingLow, OnInit-style; doesn't catch YouTube/iPhone/PyTorch
+          which have at most one internal capital)
+
+        Two-internal-cap names like 'BuildGraph' or 'SwingNode' are NOT
+        caught here — those are a judgment call. The LLM extractor is the
+        better defense for those via its prompt-level filter.
+        """
+        import re as _re
+
+        stripped = text.strip()
+        if _re.match(r"^[a-zA-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]+$", stripped):
+            return True
+        if " " not in stripped and stripped[:1].isalpha() and len(stripped) >= 6:
+            internal_caps = sum(1 for c in stripped[1:] if c.isupper())
+            if internal_caps >= 2:
+                return True
+        return False
+
+    @staticmethod
     def _refine_entity_type(text: str, current_type: str) -> str:
         """Refine entity type using heuristic rules for technical concepts."""
         text_lower = text.lower()
+
+        # Code-symbol detection: spaCy frequently labels function/class names
+        # like FindOppositeSwingBeforeStart, OnInit, build_graph as Organization
+        # or Product. Reroute these to a dedicated CodeSymbol type so they're
+        # queryable and clearly separated from real Organizations / Products.
+        if MontagueParser._looks_like_code_symbol(text):
+            return "CodeSymbol"
 
         # Keywords that strongly suggest a Concept or Method
         concept_keywords = [

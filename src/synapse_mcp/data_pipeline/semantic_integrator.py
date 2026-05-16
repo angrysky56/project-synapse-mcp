@@ -459,6 +459,49 @@ class SemanticIntegrator:
             )
             return None
 
+    @staticmethod
+    def _find_mentioned_entity_ids(
+        sentence: str, name_to_id_sorted: list[tuple[str, str]]
+    ) -> list[str]:
+        """Return entity IDs whose names appear (as case-insensitive substrings)
+        in ``sentence``, with no overlapping matches.
+
+        ``name_to_id_sorted`` must be sorted by name length DESCENDING so
+        longer names match before any of their substrings.
+        """
+        sentence_lower = sentence.lower()
+        found: list[str] = []
+        seen_spans: list[tuple[int, int]] = []
+        for ent_name_lower, ent_id in name_to_id_sorted:
+            # Use word-boundary semantics by checking surrounding chars.
+            # Pure substring matching would link a fact about "Java" to an
+            # entity named "ja", which would explode false positives.
+            start = 0
+            while True:
+                idx = sentence_lower.find(ent_name_lower, start)
+                if idx < 0:
+                    break
+                end = idx + len(ent_name_lower)
+                # Boundary check: char before must not be alphanumeric,
+                # char after must not be alphanumeric. (Allows hyphens
+                # and punctuation as boundaries.)
+                before_ok = idx == 0 or not sentence_lower[idx - 1].isalnum()
+                after_ok = (
+                    end >= len(sentence_lower)
+                    or not sentence_lower[end].isalnum()
+                )
+                if before_ok and after_ok:
+                    # Skip overlap with a longer match already recorded.
+                    span = (idx, end)
+                    if not any(
+                        not (span[1] <= s or e <= span[0]) for s, e in seen_spans
+                    ):
+                        seen_spans.append(span)
+                        found.append(ent_id)
+                        break  # one ID per name per sentence is enough
+                start = idx + 1
+        return found
+
     @logger.timer()
     async def _merge_entities_by_name(
         self, entities: list[dict]
@@ -623,43 +666,12 @@ class SemanticIntegrator:
 
         processed_data["relationships"] = valid_relationships
 
-        # Create basic facts from sentences if no semantic facts exist
+        # Create basic facts from sentences if no semantic facts exist.
+        # (MENTIONS linking for these facts is handled by the universal pass
+        # below — every fact lacking entity backlinks gets substring-matched.)
         if not processed_data["facts"] and processed_data["sentences"]:
-            # Pre-build a (lowercased entity name -> id) lookup so we can attach
-            # MENTIONS edges to these basic facts by simple substring matching.
-            # Without this, fallback facts have ``entities=[]`` and never get
-            # linked to anything in the graph — they exist as orphaned text
-            # nodes, which kills queryability ("show me facts about X" finds
-            # nothing). Match is lowercase-substring; min length 3 to avoid
-            # matching pronouns and single letters.
-            name_to_id: list[tuple[str, str]] = sorted(
-                (
-                    (e["name"].lower(), e["id"])
-                    for e in processed_data["entities"]
-                    if len(e["name"]) >= 3
-                ),
-                key=lambda pair: len(pair[0]),
-                reverse=True,  # longer names first so they match before substrings
-            )
-
             for i, sentence in enumerate(processed_data["sentences"]):
                 if len(sentence.strip()) > 10:
-                    sentence_lower = sentence.lower()
-                    mentioned_ids: list[str] = []
-                    seen_spans: list[tuple[int, int]] = []
-                    for ent_name_lower, ent_id in name_to_id:
-                        idx = sentence_lower.find(ent_name_lower)
-                        if idx < 0:
-                            continue
-                        # Skip overlap with a longer match already recorded.
-                        span = (idx, idx + len(ent_name_lower))
-                        if any(
-                            not (span[1] <= s or e <= span[0]) for s, e in seen_spans
-                        ):
-                            continue
-                        seen_spans.append(span)
-                        mentioned_ids.append(ent_id)
-
                     fact = {
                         "id": f"{processed_data['text_id']}_fact_{i}",
                         "content": sentence,
@@ -668,11 +680,46 @@ class SemanticIntegrator:
                         "source": processed_data["source"],
                         "metadata": {
                             "extraction_method": "basic_sentence_split",
-                            "entities": mentioned_ids,
+                            "entities": [],
                         },
-                        "entities": mentioned_ids,
+                        "entities": [],
                     }
                     processed_data["facts"].append(fact)
+
+        # Universal MENTIONS backfill: any Fact that wasn't given an entities
+        # list by its extractor (either path) gets one built by substring-
+        # matching entity names against the fact text. This fixes the orphan
+        # problem for types like Organization/Concept/TemporalEntity that
+        # appear in narrative text but are rarely the subject/object of an
+        # action verb the LLM extractor would emit a relation for.
+        if processed_data["facts"] and processed_data["entities"]:
+            name_to_id: list[tuple[str, str]] = sorted(
+                (
+                    (e["name"].lower(), e["id"])
+                    for e in processed_data["entities"]
+                    if len(e["name"]) >= 3
+                ),
+                key=lambda pair: len(pair[0]),
+                reverse=True,
+            )
+
+            backfilled = 0
+            for fact in processed_data["facts"]:
+                if fact.get("entities"):
+                    continue  # already linked by the extractor
+                matched_ids = self._find_mentioned_entity_ids(
+                    fact["content"], name_to_id
+                )
+                if matched_ids:
+                    fact["entities"] = matched_ids
+                    md = fact.get("metadata") or {}
+                    md["entities"] = matched_ids
+                    backfilled += 1
+            if backfilled:
+                logger.debug(
+                    "Backfilled MENTIONS on %d facts via name substring match",
+                    backfilled,
+                )
 
     def _clean_text(self, text: str) -> str:
         """
