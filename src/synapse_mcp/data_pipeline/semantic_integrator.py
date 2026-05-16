@@ -50,6 +50,25 @@ class SemanticIntegrator:
 
         if self.llm_extractor is None and self.extraction_provider == "llm":
             self.llm_extractor = LlmExtractor()
+            # Fast-fail probe: verify Ollama is reachable AND the configured
+            # extraction model is loaded. Without this, the first ingest
+            # would crash hundreds of seconds in with an opaque HTTP error.
+            # Pattern lifted from MemPalace's OllamaProvider.check_available.
+            ok, message = await self.llm_extractor.check_available()
+            if not ok:
+                logger.warning(
+                    "LLM extractor unavailable at startup: %s. "
+                    "Falling back to Montague-only extraction for this session.",
+                    message,
+                )
+                self.llm_extractor = None
+                self.extraction_provider = "montague"
+            else:
+                logger.info(
+                    "LLM extractor ready: model=%s at %s",
+                    self.llm_extractor.model,
+                    self.llm_extractor.base_url,
+                )
 
         try:
             await self.montague_parser.initialize()
@@ -307,6 +326,20 @@ class SemanticIntegrator:
     ) -> dict[str, Any] | None:
         """Convert semantic analysis entity to knowledge graph format."""
         try:
+            # Name normalization — collapse internal whitespace runs, strip
+            # leading/trailing whitespace. Without this, ingest produces
+            # entities like "Tensor Networks  " (trailing spaces) and
+            # "Quick Start  Installation  Usage  " (markdown heading
+            # sequences captured as one entity). These become orphans
+            # because no fact text contains the doubled-whitespace form.
+            raw_name = entity_data.get("text", "")
+            if not isinstance(raw_name, str):
+                raw_name = str(raw_name)
+            normalized_name = re.sub(r"\s+", " ", raw_name).strip()
+            if not normalized_name:
+                return None
+            entity_data = {**entity_data, "text": normalized_name}
+
             entity_id = KnowledgeUtils.generate_entity_id(
                 entity_data["text"], entity_data["type"]
             )
@@ -487,8 +520,7 @@ class SemanticIntegrator:
                 # and punctuation as boundaries.)
                 before_ok = idx == 0 or not sentence_lower[idx - 1].isalnum()
                 after_ok = (
-                    end >= len(sentence_lower)
-                    or not sentence_lower[end].isalnum()
+                    end >= len(sentence_lower) or not sentence_lower[end].isalnum()
                 )
                 if before_ok and after_ok:
                     # Skip overlap with a longer match already recorded.

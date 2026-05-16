@@ -56,6 +56,40 @@ class LlmExtractor:
         self.model = model or os.getenv("OLLAMA_EXTRACTION_MODEL") or "gemma4:latest"
         self.api_url = f"{self.base_url.rstrip('/')}/api/chat"
 
+    async def check_available(self) -> tuple[bool, str]:
+        """Fast probe: is Ollama reachable AND is the configured model loaded?
+
+        Returns ``(ok, message)``. Pattern lifted from MemPalace's
+        ``OllamaProvider.check_available``. Lets the server fail fast at
+        startup with an actionable error message ("run: ollama pull gemma4")
+        instead of crashing on the first ingest.
+        """
+        import aiohttp
+
+        tags_url = f"{self.base_url.rstrip('/')}/api/tags"
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(tags_url) as resp:
+                    if resp.status >= 400:
+                        return False, (
+                            f"Ollama at {self.base_url} returned HTTP {resp.status}."
+                        )
+                    data = await resp.json()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return False, f"Cannot reach Ollama at {self.base_url}: {e}"
+
+        # Ollama tag names may or may not include ':latest' suffix — accept either.
+        names = {m.get("name", "") for m in data.get("models", []) or []}
+        wanted = {self.model, f"{self.model}:latest", self.model.split(":")[0]}
+        if not names & wanted:
+            return (
+                False,
+                f"Model '{self.model}' not loaded in Ollama. "
+                f"Run: ollama pull {self.model}",
+            )
+        return True, "ok"
+
     async def extract_semantics(
         self, text: str, source_name: str | None = None
     ) -> ExtractionResult:
