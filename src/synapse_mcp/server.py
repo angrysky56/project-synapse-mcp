@@ -5,6 +5,8 @@ Main server implementation providing autonomous knowledge synthesis capabilities
 through the Model Context Protocol (MCP).
 """
 
+# pylint: disable=too-many-lines
+
 import asyncio
 import atexit
 import os
@@ -28,6 +30,7 @@ from mcp.server.fastmcp.prompts import base
 
 # Import our core modules
 from .core.knowledge_graph import KnowledgeGraph
+from .core.temporal_facts import TemporalFact, TemporalFactStore
 from .data_pipeline.semantic_integrator import SemanticIntegrator
 from .data_pipeline.text_processor import TextProcessor
 from .semantic.montague_parser import MontagueParser
@@ -52,6 +55,9 @@ class SynapseServer:
         self.text_processor: TextProcessor | None = None
         self.semantic_integrator: SemanticIntegrator | None = None
         self.wiki_adapter: WikiAdapter | None = None
+        # Bitemporal episodic-memory store. Shares Neo4j driver with the
+        # main knowledge graph; initialised after the KG connects.
+        self.temporal_facts: TemporalFactStore | None = None
         self.background_tasks: set = set()
         self.logger = logger
 
@@ -78,6 +84,15 @@ class SynapseServer:
             # Initialize knowledge graph
             self.knowledge_graph = KnowledgeGraph()
             await self.knowledge_graph.connect()
+
+            # Initialize temporal-fact store (shares the KG's Neo4j driver
+            # so we don't open a second bolt pool).
+            if self.knowledge_graph.driver is not None:
+                self.temporal_facts = TemporalFactStore(
+                    self.knowledge_graph.driver,
+                    self.knowledge_graph.database,
+                )
+                await self.temporal_facts.initialize_schema()
 
             # Initialize semantic parser
             self.montague_parser = MontagueParser()
@@ -126,7 +141,7 @@ class SynapseServer:
             else:
                 health_status["components"]["knowledge_graph"] = "not_initialized"
                 health_status["status"] = "unhealthy"
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             health_status["components"]["knowledge_graph"] = f"unhealthy: {str(e)}"
             health_status["status"] = "unhealthy"
 
@@ -138,7 +153,7 @@ class SynapseServer:
             else:
                 health_status["components"]["wiki_adapter"] = "not_initialized"
                 health_status["status"] = "unhealthy"
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             health_status["components"]["wiki_adapter"] = f"unhealthy: {str(e)}"
             health_status["status"] = "unhealthy"
 
@@ -193,7 +208,8 @@ async def lifespan_context(_mcp_app: FastMCP) -> AsyncGenerator[dict[str, Any], 
                 )
             else:
                 logger.info(
-                    "Autonomous insight engine disabled by default (SYNAPSE_AUTONOMOUS_INSIGHTS=off)"
+                    "Autonomous insight engine disabled by default "
+                    "(SYNAPSE_AUTONOMOUS_INSIGHTS=off)"
                 )
 
         yield {"synapse": synapse_server}
@@ -1201,11 +1217,316 @@ Confidence: {insight['confidence']:.3f} | Created: {insight['created_at']}
             result += f"\n*Pattern Type:* {insight['pattern_type']}\n"
             result += f"*Zettel ID:* {insight['zettel_id']}\n\n---\n\n"
 
-        return str(result)
+        return result
 
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Failed to retrieve topic insights: %s", e, exc_info=True)
         return f"❌ Failed to retrieve topic insights [{type(e).__name__}]: {str(e)}"
+
+
+# =============================================================================
+# TEMPORAL MEMORY TOOLS — episodic memory across sessions
+# =============================================================================
+#
+# These tools give Claude (and the user) a place to put time-stamped facts.
+# Different from the document-extraction graph in two ways:
+#
+#  - Every fact carries valid_from (when it became true in the world) and
+#    observed_at (when we learned it). Either end can be null when unknown.
+#  - Writes are first-class user actions, not extraction byproducts. The
+#    intent is that Claude can say "remember X" or "what did Ty say about Y
+#    last week" and have it actually work.
+#
+# Design note on date handling: dates come in as ISO 8601 strings from MCP
+# clients (no native datetime in JSON). We parse permissively — bare dates
+# like "2026-05-14" get treated as midnight UTC, full datetimes are passed
+# through. Empty / None / "" → unknown.
+
+
+def _parse_iso(s: str | None) -> datetime | None:
+    """Permissive ISO 8601 parsing for MCP-tool date arguments.
+
+    Accepts bare dates (2026-05-14), full datetimes with or without timezone,
+    and treats empty / whitespace / None as 'unknown'. Bare dates become
+    midnight UTC so they have a stable point on the timeline.
+    """
+    if not s or not s.strip():
+        return None
+    text = s.strip()
+    # Bare YYYY-MM-DD → midnight UTC
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        text = text + "T00:00:00+00:00"
+    # Python's fromisoformat handles 'Z' suffix from 3.11+
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise ValueError(f"Could not parse ISO date '{s}': {e}") from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+@mcp.tool()
+async def synapse_remember(
+    subject: str,
+    predicate: str,
+    object: str,  # noqa: A002  # pylint: disable=redefined-builtin
+    valid_from: str | None = None,
+    valid_to: str | None = None,
+    confidence: float = 1.0,
+    source: str = "agent:claude",
+    note: str = "",
+) -> str:
+    """Record a time-stamped fact in Synapse's episodic memory.
+
+    Use this whenever something is worth remembering across sessions:
+    decisions, observations, "Ty said X on date Y", health/diet/symptom
+    log entries, project milestones.
+
+    Args:
+        subject: Who or what the fact is about. Free-form name.
+        predicate: The relationship verb. snake_case preferred
+            (e.g. "started_taking", "moved_to", "decided_to_use").
+        object: The other side of the relation.
+        valid_from: ISO date or datetime when the fact became true. If
+            omitted, "now" is used. Bare dates → midnight UTC.
+        valid_to: ISO date or datetime when the fact stopped being true.
+            Omit for still-current facts.
+        confidence: 0–1. Default 1.0 for explicit user statements; lower
+            when the agent is inferring.
+        source: Where this fact came from. Defaults to "agent:claude" for
+            things Claude is recording. Use "user" or a filename for facts
+            from explicit user statements or document ingestion.
+        note: Free-form context. Stored in metadata for later recall.
+
+    Returns:
+        The fact id (stable content hash — safe to call twice).
+    """
+    if synapse_server.temporal_facts is None:
+        return "❌ Temporal-fact store not initialised."
+    try:
+        vf = _parse_iso(valid_from) or datetime.now(timezone.utc)
+        vt = _parse_iso(valid_to)
+        fact = TemporalFact(
+            subject=subject,
+            predicate=predicate,
+            object=object,
+            valid_from=vf,
+            valid_to=vt,
+            confidence=confidence,
+            source=source,
+            metadata={"note": note} if note else {},
+        )
+        fid = await synapse_server.temporal_facts.add(fact)
+        return (
+            f"✅ Remembered: ({subject}) -[{predicate}]-> ({object}) "
+            f"as of {vf.isoformat()}\nfact_id={fid}"
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("synapse_remember failed: %s", e, exc_info=True)
+        return f"❌ Failed to record fact [{type(e).__name__}]: {e}"
+
+
+@mcp.tool()
+async def synapse_recall(
+    entity: str,
+    as_of: str | None = None,
+    direction: str = "both",
+) -> str:
+    """Look up time-stamped facts about an entity.
+
+    Args:
+        entity: Name to look up. Matches subject, object, or both depending
+            on `direction`.
+        as_of: ISO date/datetime — if given, only facts valid at this point
+            in time are returned. Omit for "currently true" facts.
+        direction: "outgoing" (entity is the subject), "incoming" (entity
+            is the object), or "both" (default).
+
+    Returns:
+        Newline-separated list of facts with timestamps. Empty if none found.
+    """
+    if synapse_server.temporal_facts is None:
+        return "❌ Temporal-fact store not initialised."
+    try:
+        ao = _parse_iso(as_of)
+        rows = await synapse_server.temporal_facts.query_entity(
+            entity, as_of=ao, direction=direction
+        )
+        if not rows:
+            return f"No temporal facts found for '{entity}'."
+        lines = [f"# Facts about {entity}" + (f" as of {ao.date()}" if ao else "")]
+        for r in rows:
+            vf = r["valid_from"]
+            vt = r["valid_to"]
+            when = f"{vf}" + (f" → {vt}" if vt else " (still true)")
+            line = (
+                f"- ({r['subject']}) -[{r['predicate']}]-> ({r['object']})\n"
+                f"  {when}  source={r['source']}  conf={r['confidence']:.2f}"
+            )
+            if r.get("metadata"):
+                line += f"\n  note={r['metadata']}"
+            lines.append(line)
+        return "\n".join(lines)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("synapse_recall failed: %s", e, exc_info=True)
+        return f"❌ Failed to recall [{type(e).__name__}]: {e}"
+
+
+@mcp.tool()
+async def synapse_timeline(
+    entity: str | None = None,
+    limit: int = 50,
+) -> str:
+    """Chronological view of remembered facts.
+
+    Args:
+        entity: Scope to one entity, or None for the global timeline.
+        limit: Max number of rows. Default 50.
+
+    Returns:
+        Time-ordered fact list, oldest first.
+    """
+    if synapse_server.temporal_facts is None:
+        return "❌ Temporal-fact store not initialised."
+    try:
+        rows = await synapse_server.temporal_facts.timeline(entity, limit=limit)
+        if not rows:
+            return f"No timeline available{' for ' + entity if entity else ''}."
+        scope = f" — {entity}" if entity else ""
+        lines = [f"# Timeline{scope}"]
+        for r in rows:
+            vf = r["valid_from"]
+            vt = r["valid_to"]
+            arrow = f" → {vt}" if vt else ""
+            lines.append(
+                f"- {vf}{arrow}  ({r['subject']}) -[{r['predicate']}]-> "
+                f"({r['object']})  src={r['source']}"
+            )
+        return "\n".join(lines)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("synapse_timeline failed: %s", e, exc_info=True)
+        return f"❌ Failed to retrieve timeline [{type(e).__name__}]: {e}"
+
+
+@mcp.tool()
+async def synapse_invalidate(
+    subject: str,
+    predicate: str,
+    object: str,  # noqa: A002  # pylint: disable=redefined-builtin
+    ended: str | None = None,
+) -> str:
+    """Mark a previously-recorded fact as no longer true.
+
+    Sets ``valid_to`` rather than deleting — the historical record stays
+    intact, but the fact is no longer "currently true" for default queries.
+
+    Args:
+        subject/predicate/object: The triple to invalidate.
+        ended: ISO date/datetime when the fact stopped being true.
+            Defaults to now if omitted.
+
+    Returns:
+        Number of facts affected.
+    """
+    if synapse_server.temporal_facts is None:
+        return "❌ Temporal-fact store not initialised."
+    try:
+        end_time = _parse_iso(ended) or datetime.now(timezone.utc)
+        n = await synapse_server.temporal_facts.invalidate(
+            subject, predicate, object, ended=end_time
+        )
+        if n == 0:
+            return (
+                f"No still-true facts matched ({subject})-[{predicate}]->"
+                f"({object})."
+            )
+        return (
+            f"✅ Invalidated {n} fact(s): ({subject})-[{predicate}]->"
+            f"({object}) ended at {end_time.isoformat()}"
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("synapse_invalidate failed: %s", e, exc_info=True)
+        return f"❌ Failed to invalidate [{type(e).__name__}]: {e}"
+
+
+@mcp.tool()
+async def synapse_causal_window(
+    effect_entity: str,
+    before: str,
+    within_days: int = 30,
+) -> str:
+    """Find candidate causes by temporal correlation.
+
+    Surfaces facts whose ``valid_from`` falls in the window
+    ``[before - within_days, before]`` and that share at least one
+    entity with facts about ``effect_entity``.
+
+    This is exactly the "track everything you ate to find what caused
+    the headaches" pattern — you record symptom onset, you record meals
+    and medications, then this tool surfaces co-occurring events as
+    candidates. The tool returns correlation; the human (or a downstream
+    reasoning step) decides what caused what.
+
+    Args:
+        effect_entity: The thing whose causes you're hunting (e.g. "headache",
+            "rash", "build failure").
+        before: ISO date/datetime — when the effect was observed.
+        within_days: How far back to search. Default 30.
+
+    Returns:
+        Ranked list of candidate cause-effect pairings with day deltas.
+    """
+    if synapse_server.temporal_facts is None:
+        return "❌ Temporal-fact store not initialised."
+    try:
+        before_dt = _parse_iso(before)
+        if before_dt is None:
+            return "❌ `before` is required for causal-window search."
+        rows = await synapse_server.temporal_facts.causal_chain(
+            effect_entity, before=before_dt, within_days=within_days
+        )
+        if not rows:
+            return (
+                f"No co-occurring facts found for '{effect_entity}' within "
+                f"{within_days} days before {before_dt.date()}."
+            )
+        lines = [
+            f"# Candidate causes for {effect_entity} before "
+            f"{before_dt.date()} (window={within_days}d)",
+            "(Correlation only — these are candidates, not proven causes.)",
+        ]
+        for r in rows:
+            lines.append(
+                f"- {r['days_before']}d before: "
+                f"({r['cause_subject']})-[{r['cause_predicate']}]->"
+                f"({r['cause_object']})\n"
+                f"  effect: ({r['effect_subject']})-[{r['effect_predicate']}]->"
+                f"({r['effect_object']})  "
+                f"shared_entities={r['shared_entities']}"
+            )
+        return "\n".join(lines)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("synapse_causal_window failed: %s", e, exc_info=True)
+        return f"❌ Failed causal-window search [{type(e).__name__}]: {e}"
+
+
+@mcp.tool()
+async def synapse_memory_stats() -> str:
+    """Quick stats: how many temporal facts are stored, time span covered."""
+    if synapse_server.temporal_facts is None:
+        return "❌ Temporal-fact store not initialised."
+    try:
+        s = await synapse_server.temporal_facts.stats()
+        return (
+            f"Temporal facts: {s['total']:,} total, "
+            f"{s['still_true']:,} still true\n"
+            f"Earliest: {s['earliest']}\n"
+            f"Latest:   {s['latest']}"
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("synapse_memory_stats failed: %s", e, exc_info=True)
+        return f"❌ Failed stats query [{type(e).__name__}]: {e}"
 
 
 # =============================================================================

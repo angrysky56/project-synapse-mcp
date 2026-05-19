@@ -55,6 +55,7 @@ Source = "https://github.com/angrysky56/project-synapse-mcp"
 
 [project.scripts]
 synapse-mcp = "synapse_mcp.server:main"
+synapse-ingest = "synapse_mcp.tools.ingest:main"
 
 [tool.hatch.version]
 path = "src/synapse_mcp/__about__.py"

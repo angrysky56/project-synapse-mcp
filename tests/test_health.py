@@ -1,5 +1,4 @@
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -60,7 +59,10 @@ async def test_server_health_wiki_failure(mock_server):
 @pytest.mark.asyncio
 async def test_server_initialize_failure_stops_startup():
     """Test that a health check failure during initialization raises an exception."""
-    with patch("synapse_mcp.server.KnowledgeGraph", return_value=AsyncMock()):
+    with patch("synapse_mcp.server.KnowledgeGraph") as mock_kg_class:
+        mock_kg = AsyncMock()
+        mock_kg.driver = None
+        mock_kg_class.return_value = mock_kg
         with patch(
             "synapse_mcp.server.WikiAdapter", return_value=AsyncMock()
         ) as mock_wiki:
