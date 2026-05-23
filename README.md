@@ -136,7 +136,7 @@ defuddle --version
 ### Installation
 
 ```bash
-cd /home/ty/Repositories/ai_workspace
+cd /path/to/your/workspace
 git clone <repository-url> project-synapse-mcp
 cd project-synapse-mcp
 uv venv --python 3.12 --seed

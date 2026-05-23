@@ -16,9 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import aiofiles  # type: ignore
+import aiofiles
 import networkx as nx
 import numpy as np
+from scipy.sparse import csr_matrix
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -95,7 +96,7 @@ class WikiAdapter:
     """Manages read/write access to an Obsidian vault for the LLM-WIKI pattern."""
 
     def __init__(self, vault_path: str | None = None, repo_url: str | None = None):
-        self.vault_path = Path(str(vault_path or os.getenv("WIKI_VAULT_PATH", "")))
+        self.vault_path = Path(vault_path or os.getenv("WIKI_VAULT_PATH", ""))
         self.repo_url = repo_url or os.getenv("WIKI_GITHUB_REPO", "")
         # Sub-directories following the Karpathy 3-layer architecture
         self.raw_dir = self.vault_path / "raw"
@@ -591,7 +592,8 @@ class WikiAdapter:
 
         # TF-IDF vectors
         vectorizer = TfidfVectorizer(max_features=500, stop_words="english")
-        matrix = vectorizer.fit_transform(texts).toarray()
+        sparse_matrix = vectorizer.fit_transform(texts)
+        matrix = csr_matrix(sparse_matrix).toarray()
         sim_matrix = cosine_similarity(matrix)
         # Distance matrix for clustering
         dist_matrix = 1.0 - sim_matrix

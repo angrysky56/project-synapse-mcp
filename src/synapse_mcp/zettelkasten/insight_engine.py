@@ -22,9 +22,64 @@ try:
 except ImportError:
     community_louvain = None
 
+from ..llm import LlmProvider, LlmResponseError, get_provider
 from ..utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+# JSON schema the LLM must populate during insight synthesis. Kept here so
+# the contract between the engine and any provider is in one place.
+_INSIGHT_SYNTHESIS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "content": {"type": "string", "minLength": 1},
+        "topic": {"type": "string"},
+        "confidence_adjustment": {
+            "type": "number",
+            "minimum": -0.3,
+            "maximum": 0.3,
+            "description": (
+                "Multiplier-style nudge to the structural confidence "
+                "based on how compelling the LLM finds the pattern. "
+                "Added to base confidence and clamped to [0,1]."
+            ),
+        },
+        "novelty_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    },
+    "required": ["title", "content"],
+    "additionalProperties": False,
+}
+
+_INSIGHT_SYNTHESIS_SYSTEM = (
+    "You are a Zettelkasten knowledge synthesizer for a structured knowledge "
+    "graph. You receive a STRUCTURAL PATTERN detected by graph algorithms "
+    "(community / centrality / path / semantic cluster) plus the entity "
+    "names and supporting fact statements involved.\n\n"
+    "Your job: write a single concise insight note that explains WHY this "
+    "pattern is interesting and WHAT it implies. Be specific to the entities "
+    "given — do not give generic advice. Cite at least one entity by name in "
+    "the content.\n\n"
+    "CRITICAL OUTPUT RULES:\n"
+    "1. Output ONLY a single valid JSON object — no prose, no markdown, no "
+    "code fences, no explanation outside the JSON.\n"
+    "2. The JSON object must have these fields:\n"
+    "   - 'title' (string, <= 120 chars): a precise headline naming the "
+    "key entity or relationship.\n"
+    "   - 'content' (string): 2–5 sentence synthesis. Reference the "
+    "specific entities. State the implication, not the procedure that "
+    "found it.\n"
+    "   - 'topic' (string, optional): the primary subject keyword.\n"
+    "   - 'confidence_adjustment' (number in [-0.3, 0.3], optional): nudge "
+    "to the structural confidence based on how compelling the connection "
+    "looks given the evidence. Positive = stronger than topology suggests, "
+    "negative = weaker.\n"
+    "   - 'novelty_score' (number in [0,1], optional): how non-obvious the "
+    "insight is. 1.0 = surprising, 0.0 = trivially obvious.\n"
+    "3. If the evidence is too thin to say anything specific, return a "
+    "short, honest note rather than padding with generic language."
+)
 
 
 class InsightEngine:
@@ -100,6 +155,41 @@ class InsightEngine:
         )
         self.link_threshold = float(os.getenv("LINK_THRESHOLD", "0.7"))
         self.logger = logger
+
+        # Optional LLM synthesis. When unavailable or disabled, the engine
+        # falls back to the templated insight text — same behavior as before.
+        # Set INSIGHT_LLM_PROVIDER=off (or LLM_PROVIDER=off) to disable.
+        self.llm_synth_enabled: bool = (
+            os.getenv("INSIGHT_LLM_ENABLED", "true").lower() == "true"
+        )
+        self._llm_provider: LlmProvider | None = None
+        if self.llm_synth_enabled:
+            try:
+                provider_name = os.getenv("INSIGHT_LLM_PROVIDER") or os.getenv(
+                    "LLM_PROVIDER"
+                )
+                # Only read INSIGHT_LLM_MODEL here — falling through to
+                # EXTRACTION_LLM_MODEL would be wrong if the insight provider
+                # differs from the extraction provider (e.g. extraction uses
+                # ollama/gemma4 and insights use minimax — gemma4 is not a
+                # valid model id on MiniMax). When INSIGHT_LLM_MODEL is unset
+                # the provider falls back to its own default model.
+                model = os.getenv("INSIGHT_LLM_MODEL")
+                self._llm_provider = get_provider(provider_name, model=model)
+                logger.info(
+                    "Insight LLM synthesis enabled: provider=%s model=%s",
+                    self._llm_provider.name,
+                    self._llm_provider.model,
+                )
+            except (
+                ValueError,
+                Exception,
+            ) as e:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Insight LLM synthesis disabled (provider init failed): %s", e
+                )
+                self.llm_synth_enabled = False
+                self._llm_provider = None
 
     @logger.timer()
     async def initialize(self) -> None:
@@ -509,20 +599,40 @@ class InsightEngine:
     async def _generate_insight_from_pattern(
         self, pattern: dict[str, Any]
     ) -> dict[str, Any] | None:
-        """Generate an insight from a detected pattern."""
+        """Generate an insight from a detected pattern.
+
+        Two-stage pipeline:
+
+        1. Build a structural insight from a template (always runs, always
+           cheap). This guarantees we get *something* even if the LLM is
+           down. The template knows the entity names, evidence, and pattern
+           metadata.
+        2. If an LLM provider is configured, ask it to synthesize a sharper
+           title + content from the same inputs. On any failure (provider
+           error, bad JSON, empty content) we keep the template result —
+           same behavior as before the LLM was added.
+        """
         try:
             pattern_type = pattern["type"]
 
             if pattern_type == "community":
-                return await self._generate_community_insight(pattern)
+                base = await self._generate_community_insight(pattern)
             elif pattern_type == "centrality":
-                return await self._generate_centrality_insight(pattern)
+                base = await self._generate_centrality_insight(pattern)
             elif pattern_type == "path":
-                return await self._generate_path_insight(pattern)
+                base = await self._generate_path_insight(pattern)
             elif pattern_type == "semantic_cluster":
-                return await self._generate_semantic_insight(pattern)
+                base = await self._generate_semantic_insight(pattern)
+            else:
+                return None
 
-            return None
+            if base is None:
+                return None
+
+            if self.llm_synth_enabled and self._llm_provider is not None:
+                base = await self._synthesize_insight_with_llm(pattern, base)
+
+            return base
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error(
@@ -531,6 +641,114 @@ class InsightEngine:
                 e,
             )
             return None
+
+    async def _synthesize_insight_with_llm(
+        self, pattern: dict[str, Any], base: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Rewrite a templated insight via the configured LLM provider.
+
+        On any failure this returns ``base`` unchanged — the template result
+        is always preserved as the fallback, so a flaky cloud provider
+        cannot break ``generate_insights``.
+
+        Args:
+            pattern: The detected pattern dict (community/centrality/…).
+            base: The templated insight dict produced by
+                :meth:`_generate_*_insight`. Used as the fallback and as
+                context for the LLM (entity names, evidence, etc.).
+
+        Returns:
+            Either an LLM-synthesized insight (with the original
+            ``zettel_id``, ``confidence``, ``evidence``, ``metadata``
+            preserved) or ``base`` if synthesis was skipped or failed.
+        """
+        if self._llm_provider is None:
+            return base
+
+        # Build a compact context the LLM can reason about. We deliberately
+        # keep the evidence statements truncated — cloud token budgets matter
+        # and the LLM is meant to *interpret* the pattern, not summarize the
+        # source documents.
+        evidence = base.get("evidence") or []
+        evidence_lines = [
+            f"- {e.get('statement', '')[:240]} (source: {e.get('source', 'unknown')})"
+            for e in evidence[:8]
+            if e.get("statement")
+        ]
+        evidence_text = (
+            "\n".join(evidence_lines) if evidence_lines else "(none available)"
+        )
+
+        user_payload = (
+            f"PATTERN TYPE: {pattern['type']}\n"
+            f"PATTERN ID: {pattern.get('pattern_id', 'n/a')}\n"
+            f"STRUCTURAL CONFIDENCE: {pattern.get('confidence', 0.0):.3f}\n"
+            f"TEMPLATED DRAFT (do not copy verbatim):\n"
+            f"  title: {base.get('title', '')}\n"
+            f"  topic: {base.get('topic', '')}\n"
+            f"  content: {base.get('content', '')[:1200]}\n"
+            f"\nSUPPORTING EVIDENCE:\n{evidence_text}\n"
+        )
+
+        max_tokens = int(os.getenv("INSIGHT_LLM_MAX_TOKENS", "2048"))
+        timeout = int(os.getenv("INSIGHT_LLM_TIMEOUT", "60"))
+
+        try:
+            synth = await self._llm_provider.chat_json(
+                system=_INSIGHT_SYNTHESIS_SYSTEM,
+                user=user_payload,
+                temperature=0.2,
+                max_tokens=max_tokens,
+                schema=_INSIGHT_SYNTHESIS_SCHEMA,
+                timeout=timeout,
+            )
+        except LlmResponseError as e:
+            logger.info(
+                "LLM synthesis failed for %s (%s); keeping templated insight.",
+                pattern.get("pattern_id"),
+                e,
+            )
+            return base
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "Unexpected LLM synthesis error for %s: %s; keeping template.",
+                pattern.get("pattern_id"),
+                e,
+            )
+            return base
+
+        title = (synth.get("title") or "").strip()
+        content = (synth.get("content") or "").strip()
+        if not title or not content:
+            logger.info(
+                "LLM returned empty title/content for %s; keeping template.",
+                pattern.get("pattern_id"),
+            )
+            return base
+
+        # Apply confidence adjustment, clamped to [0, 1].
+        adj = synth.get("confidence_adjustment")
+        confidence = float(base.get("confidence", 0.0))
+        if isinstance(adj, int | float):
+            confidence = max(0.0, min(1.0, confidence + float(adj)))
+
+        merged: dict[str, Any] = dict(base)
+        merged["title"] = title[:200]
+        merged["content"] = content
+        if synth.get("topic"):
+            merged["topic"] = str(synth["topic"])
+        merged["confidence"] = confidence
+
+        metadata = dict(merged.get("metadata") or {})
+        metadata["llm_synthesized"] = True
+        metadata["llm_provider"] = self._llm_provider.name
+        metadata["llm_model"] = self._llm_provider.model
+        if "novelty_score" in synth:
+            metadata["novelty_score"] = synth["novelty_score"]
+        if isinstance(adj, int | float):
+            metadata["confidence_adjustment"] = float(adj)
+        merged["metadata"] = metadata
+        return merged
 
     async def _generate_community_insight(
         self, pattern: dict[str, Any]

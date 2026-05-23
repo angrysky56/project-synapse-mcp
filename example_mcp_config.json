@@ -4,7 +4,7 @@
       "command": "uv",
       "args": [
         "--directory",
-        "/home/ty/Repositories/ai_workspace/project-synapse-mcp",
+        "/absolute/path/to/your/project-synapse-mcp",
         "run",
         "python",
         "-m",
@@ -16,11 +16,11 @@
         "NEO4J_PASSWORD": "synapse_password",
         "NEO4J_DATABASE": "synapse",
         "LOG_LEVEL": "INFO",
-        "WIKI_VAULT_PATH": "/home/ty/Documents/LLM-WIKI",
-        "WIKI_GITHUB_REPO": "https://github.com/angrysky56/LLM-WIKI",
+        "WIKI_VAULT_PATH": "/absolute/path/to/your/LLM-WIKI",
+        "WIKI_GITHUB_REPO": "https://github.com/your-username/your-repo",
         "EMBEDDING_PROVIDER": "ollama",
         "EMBEDDING_DIMENSION": "2560",
-        "OLLAMA_EMBED_MODEL": "qwen3-embedding:4b"        
+        "OLLAMA_EMBED_MODEL": "qwen3-embedding:4b"
       }
     }
   }

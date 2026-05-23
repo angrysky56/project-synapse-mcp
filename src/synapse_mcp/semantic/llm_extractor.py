@@ -1,16 +1,21 @@
-"""LLM-based semantic extraction module."""
+"""LLM-based semantic extraction module.
+
+Uses the pluggable :mod:`synapse_mcp.llm` provider abstraction so the same
+extractor can run against local Ollama (default) or cloud APIs (MiniMax,
+OpenRouter, …) without code changes — see ``EXTRACTION_LLM_PROVIDER`` and
+``EXTRACTION_LLM_MODEL`` env vars, or fall back to ``LLM_PROVIDER`` /
+``LLM_MODEL``.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import os
-import re
 from typing import Any
 
-import aiohttp
 from pydantic import BaseModel, Field
+
+from ..llm import LlmProvider, LlmResponseError, get_provider
 
 logger = logging.getLogger(__name__)
 
@@ -41,236 +46,190 @@ class ExtractionResult(BaseModel):
     relations: list[ExtractedRelation] = Field(default_factory=list)
 
 
+# Kept as a module-level constant so the prompt is easy to diff against past
+# versions when tuning extraction quality. Changes here have direct, large
+# impact on what ends up in the knowledge graph.
+EXTRACTION_INSTRUCTIONS = (
+    "You are an expert knowledge extraction processor. Your task is to extract "
+    "high-signal entities and their semantic relationships into JSON format from "
+    "the provided source.\n\n"
+    "CRITICAL CONSTRAINTS:\n"
+    "1. Focus ONLY on core technical, conceptual, or factual knowledge.\n"
+    "2. DO NOT extract: navigation labels, UI button text, citation counts, "
+    "download counts, 'HuggingFace' page furniture, or page metadata.\n"
+    "3. DO NOT extract: generic fragments like 'the article' or 'this model'.\n"
+    "4. DO NOT extract code symbols (function names, class names, variable "
+    "names) as Organizations or Products. Patterns like 'BuildGraph', "
+    "'OnInit', 'find_swing_low', 'XAUUSD' are CODE — either skip them "
+    "entirely or label them with type 'CodeSymbol'.\n"
+    "5. DO NOT extract author surnames that appear ONLY in a bibliography "
+    "or reference list (e.g., 'Schramm', 'Channon' appearing only in "
+    "'(Schramm et al., 2011; Channon, 2006)'). Extract a Person only if "
+    "they are discussed substantively in the narrative.\n"
+    "6. Predicates must be technical, directed graph relations (e.g., "
+    "'implements', 'depends_on', 'utilizes', 'defines', 'is_instance_of').\n"
+    "7. Use consistent, snake_case or SCREAMING_SNAKE_CASE for entity types.\n"
+    "8. Choose the MOST SPECIFIC entity type that applies. Use the controlled "
+    "vocabulary below FIRST; only invent a new type when nothing fits.\n"
+    "   - Person, Organization, Demographic (nationality/religion/group)\n"
+    "   - Location (place/facility), TemporalEntity (date/time)\n"
+    "   - Product (named software/hardware/system), Method (algorithm/technique),\n"
+    "     Architecture (neural net/system design), Dataset, Benchmark, Library,\n"
+    "     Language (programming or natural), Framework, Model (specific named model)\n"
+    "   - CodeSymbol (function/class/variable identifiers from source code)\n"
+    "   - Concept (USE SPARINGLY — only for genuine abstract ideas that don't fit\n"
+    "     anything else: e.g. 'emergence', 'consciousness', 'lumpability'. \n"
+    "     NEVER label a specific method, system, or named thing as 'Concept'.)\n"
+    "   - Theorem, Law, Principle (for formal mathematical or scientific results)\n"
+    "   - Quantity (numbers, percentages, measurements)\n"
+    "   - CreativeWork (papers, books, articles, songs)\n"
+    "   - Event (named events, conferences, releases)\n"
+    "9. If the source contains URLs, DO NOT extract them as entities unless they "
+    "are primary subjects.\n\n"
+    "CRITICAL: Output ONLY valid JSON format. No chat, no summary, no markdown "
+    "formatting outside the JSON, simply analyse and fill in the JSON object.\n\n"
+    "OUTPUT FORMAT: Return a JSON object with:\n"
+    "- 'entities': list of { 'text': str, 'type': str, 'confidence': float }\n"
+    "- 'relations': list of { 'subject': str, 'object': str, 'predicate': str, "
+    "'confidence': float }"
+)
+
+
 class LlmExtractor:
-    """Extractor that uses an LLM to identify entities and relations."""
+    """Extractor that uses an LLM to identify entities and relations.
 
-    base_url: str
-    model: str
-    api_url: str
+    The extractor is provider-agnostic. By default it reads
+    ``EXTRACTION_LLM_PROVIDER`` (falling back to ``LLM_PROVIDER``, then
+    ``ollama``) and ``EXTRACTION_LLM_MODEL`` (falling back to provider
+    defaults). This lets the heavier insight-synthesis path use a cloud
+    model while extraction stays on local Ollama for cost reasons — or
+    vice versa.
+    """
 
-    def __init__(self, base_url: str | None = None, model: str | None = None) -> None:
-        """Initialize the extractor with base URL and model name."""
-        self.base_url = (
-            base_url or os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434"
-        )
-        self.model = model or os.getenv("OLLAMA_EXTRACTION_MODEL") or "gemma4:latest"
-        self.api_url = f"{self.base_url.rstrip('/')}/api/chat"
+    provider: LlmProvider
+
+    def __init__(
+        self,
+        provider: LlmProvider | None = None,
+        *,
+        base_url: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Initialize the extractor.
+
+        Args:
+            provider: Optional pre-built provider. If None, one is resolved
+                from ``EXTRACTION_LLM_PROVIDER`` / ``LLM_PROVIDER`` env vars.
+            base_url: Override base URL (only used if ``provider`` is None).
+            model: Override model (only used if ``provider`` is None).
+        """
+        if provider is not None:
+            self.provider = provider
+        else:
+            provider_name = (
+                os.getenv("EXTRACTION_LLM_PROVIDER") or os.getenv("LLM_PROVIDER")
+            )
+            resolved_model = (
+                model
+                or os.getenv("EXTRACTION_LLM_MODEL")
+                or os.getenv("OLLAMA_EXTRACTION_MODEL")
+            )
+            self.provider = get_provider(
+                provider_name, model=resolved_model, base_url=base_url
+            )
+
+    # Backwards-compatible attribute shims — older call sites read
+    # ``.base_url`` and ``.model`` directly (e.g. semantic_integrator's
+    # startup log line).
+    @property
+    def base_url(self) -> str:
+        return self.provider.base_url
+
+    @property
+    def model(self) -> str:
+        return self.provider.model
 
     async def check_available(self) -> tuple[bool, str]:
-        """Fast probe: is Ollama reachable AND is the configured model loaded?
+        """Fast probe via the underlying provider.
 
-        Returns ``(ok, message)``. Pattern lifted from MemPalace's
-        ``OllamaProvider.check_available``. Lets the server fail fast at
-        startup with an actionable error message ("run: ollama pull gemma4")
-        instead of crashing on the first ingest.
+        Lets the server fail fast at startup with an actionable error
+        message instead of crashing on the first ingest.
         """
-        import aiohttp
-
-        tags_url = f"{self.base_url.rstrip('/')}/api/tags"
-        try:
-            timeout = aiohttp.ClientTimeout(total=5)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(tags_url) as resp:
-                    if resp.status >= 400:
-                        return False, (
-                            f"Ollama at {self.base_url} returned HTTP {resp.status}."
-                        )
-                    data = await resp.json()
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            return False, f"Cannot reach Ollama at {self.base_url}: {e}"
-
-        # Ollama tag names may or may not include ':latest' suffix — accept either.
-        names = {m.get("name", "") for m in data.get("models", []) or []}
-        wanted = {self.model, f"{self.model}:latest", self.model.split(":")[0]}
-        if not names & wanted:
-            return (
-                False,
-                f"Model '{self.model}' not loaded in Ollama. "
-                f"Run: ollama pull {self.model}",
-            )
-        return True, "ok"
+        return await self.provider.check_available()
 
     async def extract_semantics(
         self, text: str, source_name: str | None = None
     ) -> ExtractionResult:
-        """
-        Extract entities and relations from text using an LLM.
+        """Extract entities and relations from text using the configured LLM.
 
         Args:
             text: The raw text to analyze.
             source_name: Optional name or path of the source.
 
         Returns:
-            An ExtractionResult containing discovered entities and relations.
+            An :class:`ExtractionResult` with discovered entities and relations.
+            Returns an empty result on extractor failure (never raises) so the
+            ingest pipeline can keep going and the Montague parser can serve
+            as a fallback.
         """
-        extraction_instructions = (
-            "You are an expert knowledge extraction processor. Your task is to extract "
-            "high-signal entities and their semantic relationships into JSON format from the provided source.\n\n"
-            "CRITICAL CONSTRAINTS:\n"
-            "1. Focus ONLY on core technical, conceptual, or factual knowledge.\n"
-            "2. DO NOT extract: navigation labels, UI button text, citation counts, "
-            "download counts, 'HuggingFace' page furniture, or page metadata.\n"
-            "3. DO NOT extract: generic fragments like 'the article' or 'this model'.\n"
-            "4. DO NOT extract code symbols (function names, class names, variable "
-            "names) as Organizations or Products. Patterns like 'BuildGraph', "
-            "'OnInit', 'find_swing_low', 'XAUUSD' are CODE — either skip them "
-            "entirely or label them with type 'CodeSymbol'.\n"
-            "5. DO NOT extract author surnames that appear ONLY in a bibliography "
-            "or reference list (e.g., 'Schramm', 'Channon' appearing only in "
-            "'(Schramm et al., 2011; Channon, 2006)'). Extract a Person only if "
-            "they are discussed substantively in the narrative.\n"
-            "6. Predicates must be technical, directed graph relations (e.g., 'implements', 'depends_on', 'utilizes', 'defines', 'is_instance_of').\n"
-            "7. Use consistent, snake_case or SCREAMING_SNAKE_CASE for entity types.\n"
-            "8. Choose the MOST SPECIFIC entity type that applies. Use the controlled "
-            "vocabulary below FIRST; only invent a new type when nothing fits.\n"
-            "   - Person, Organization, Demographic (nationality/religion/group)\n"
-            "   - Location (place/facility), TemporalEntity (date/time)\n"
-            "   - Product (named software/hardware/system), Method (algorithm/technique),\n"
-            "     Architecture (neural net/system design), Dataset, Benchmark, Library,\n"
-            "     Language (programming or natural), Framework, Model (specific named model)\n"
-            "   - CodeSymbol (function/class/variable identifiers from source code)\n"
-            "   - Concept (USE SPARINGLY — only for genuine abstract ideas that don't fit\n"
-            "     anything else: e.g. 'emergence', 'consciousness', 'lumpability'. \n"
-            "     NEVER label a specific method, system, or named thing as 'Concept'.)\n"
-            "   - Theorem, Law, Principle (for formal mathematical or scientific results)\n"
-            "   - Quantity (numbers, percentages, measurements)\n"
-            "   - CreativeWork (papers, books, articles, songs)\n"
-            "   - Event (named events, conferences, releases)\n"
-            "9. If the source contains URLs, DO NOT extract them as entities unless they are primary subjects.\n\n"
-            "CRITICAL: Output ONLY valid JSON format. No chat, no summary, no markdown formatting outside the JSON, simply analyse and fill in the JSON object.\n\n"
-            "OUTPUT FORMAT: Return a JSON object with:\n"
-            "- 'entities': list of { 'text': str, 'type': str, 'confidence': float }\n"
-            "- 'relations': list of { 'subject': str, 'object': str, 'predicate': str, 'confidence': float }"
+        source_info = f" [Source: {source_name}]" if source_name else ""
+        prompt = (
+            f"Extract knowledge from the following source{source_info}:\n\n{text}"
         )
 
-        source_info = f" [Source: {source_name}]" if source_name else ""
-        prompt = f"Extract knowledge from the following source{source_info}:\n\n{text}"
+        # 16384 was the value tuned for Gemma — leaves plenty of room for
+        # entity-dense documents while still capping runaway generations.
+        max_tokens = int(os.getenv("EXTRACTION_MAX_TOKENS", "16384"))
+        timeout = int(os.getenv("OLLAMA_TIMEOUT", "120"))
 
-        payload = {
-            "model": self.model,
-            "system": extraction_instructions,  # Top-level hard control
-            "messages": [
-                {"role": "user", "content": prompt},
-            ],
-            "stream": False,
-            "format": "json",
-            "options": {
-                "temperature": 0.0,
-                "num_ctx": 131072,  # Full 128K context for Gemma 4
-                # 4096 was truncating output mid-relations on big docs (e.g. an
-                # Eris-mythology article with ~190 entities), leaving the
-                # 'relations' field empty after JSON parse. 16384 gives plenty
-                # of room for entity-dense documents while still being capped.
-                "num_predict": 16384,
-                "num_keep": -1,  # Keep the system instructions in KV cache
-                "top_k": 1,
-                "top_p": 0.1,
-            },
-            "think": True,  # Allow frontier reasoning (segregated in response)
-        }
-
-        # Use a generous default for local models, configurable via env
-        env_timeout = int(os.getenv("OLLAMA_TIMEOUT", "120"))
-        timeout = aiohttp.ClientTimeout(total=env_timeout)
         for attempt in range(2):
             try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(self.api_url, json=payload) as response:
-                        if response.status >= 400:
-                            error_text = await response.text()
-                            logger.warning(
-                                "Ollama API returned error %d: %s",
-                                response.status,
-                                error_text,
-                            )
-                            response.raise_for_status()
-
-                        result_json = await response.json()
-                        content = (
-                            result_json.get("message", {}).get("content", "").strip()
-                        )
-                        thinking = result_json.get("message", {}).get("thinking", "")
-                        if thinking:
-                            logger.debug(
-                                "Gemma Reasoning trace: %s", thinking[:200] + "..."
-                            )
-                        if not content:
-                            logger.warning("Ollama returned empty content for message.")
-                            continue
-
-                        try:
-                            # 1. Strip <think>, <thought>, or <reasoning> blocks
-                            content = re.sub(
-                                r"<(?:think|thought|reasoning)>[\s\S]*?</(?:think|thought|reasoning)>",
-                                "",
-                                content,
-                            )
-
-                            # 2. Clean markdown code fences if present
-                            if "```" in content:
-                                # Try to find json block specifically
-                                json_match = re.search(
-                                    r"```(?:json)?\s*([\s\S]*?)\s*```", content
-                                )
-                                if json_match:
-                                    content = json_match.group(1)
-                                else:
-                                    # Fallback: just strip all fences
-                                    content = (
-                                        content.replace("```json", "")
-                                        .replace("```", "")
-                                        .strip()
-                                    )
-
-                            # 3. Try to find the first '{' and last '}' to skip remaining preamble/postamble
-                            start_idx = content.find("{")
-                            end_idx = content.rfind("}")
-                            if start_idx != -1 and end_idx != -1:
-                                content = content[start_idx : end_idx + 1]
-
-                            data = json.loads(content)
-                        except (json.JSONDecodeError, ValueError) as je:
-                            logger.warning(
-                                "Failed to parse LLM content as JSON: %s...",
-                                content[:100],
-                            )
-                            raise je
-
-                        raw_result = ExtractionResult.model_validate(data)
-                        if not raw_result.relations:
-                            # Visibility: knowing whether the model produced
-                            # zero relations vs. produced some that failed
-                            # validation is the difference between "Gemma is
-                            # being weird about this text" and "our schema is
-                            # too strict". Log content size + entity count
-                            # for triage.
-                            logger.info(
-                                "LLM extraction returned 0 relations "
-                                "(entities=%d, content_chars=%d). Source preview: %s",
-                                len(raw_result.entities),
-                                len(content),
-                                content[:200].replace("\n", " "),
-                            )
-                        return self._sanitize_results(raw_result)
-            except (
-                aiohttp.ClientError,
-                json.JSONDecodeError,
-                ValueError,
-                asyncio.TimeoutError,
-            ) as e:
-                logger.warning("Extraction attempt %d failed: %s", attempt + 1, e)
+                data = await self.provider.chat_json(
+                    system=EXTRACTION_INSTRUCTIONS,
+                    user=prompt,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                )
+                raw_result = ExtractionResult.model_validate(data)
+                if not raw_result.relations:
+                    # Visibility: knowing whether the model produced zero
+                    # relations vs produced some that failed validation is
+                    # the difference between "model is being weird about
+                    # this text" and "our schema is too strict".
+                    logger.info(
+                        "LLM extraction returned 0 relations "
+                        "(entities=%d). Source: %s",
+                        len(raw_result.entities),
+                        source_name or "<inline>",
+                    )
+                return self._sanitize_results(raw_result)
+            except LlmResponseError as e:
+                logger.warning(
+                    "Extraction attempt %d via %s failed: %s",
+                    attempt + 1,
+                    self.provider.name,
+                    e,
+                )
                 if attempt == 1:
                     logger.error(
-                        "All extraction attempts failed for text: %s...", text[:50]
+                        "All extraction attempts failed for text: %s...",
+                        text[:50],
                     )
-                    # We don't want to crash the whole pipeline if LLM fails,
-                    # so we return an empty result and let the integrator fallback.
+                    # Don't crash the pipeline — return empty and let the
+                    # integrator fall back to Montague.
+                    return ExtractionResult()
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Unexpected error in extraction attempt %d: %s", attempt + 1, e
+                )
+                if attempt == 1:
                     return ExtractionResult()
 
         return ExtractionResult()
 
     def _sanitize_results(self, result: ExtractionResult) -> ExtractionResult:
-        """Filter out low-signal entities and furniture leakage."""
+        """Filter out low-signal entities and UI furniture leakage."""
         junk_types = {"LINK", "NAV_METADATA", "UI_LABEL", "METADATA"}
         junk_names = {
             "citation downloads",
@@ -284,24 +243,18 @@ class LlmExtractor:
         }
 
         filtered_entities = []
-        valid_entity_names = set()
+        valid_entity_names: set[str] = set()
 
         for entity in result.entities:
             name_lower = entity.text.lower().strip()
 
-            # Skip junk types
             if entity.type.upper() in junk_types:
                 continue
-
-            # Skip pure numbers or single characters
             if name_lower.isdigit() or len(name_lower) < 2:
                 continue
-
-            # Skip common UI headers
             if name_lower in junk_names:
                 continue
-
-            # Skip obvious UI fragments (e.g., "about 24", "8192 4096")
+            # Obvious UI fragments (e.g., "about 24", "8192 4096")
             if (
                 any(char.isdigit() for char in name_lower)
                 and len(name_lower.split()) < 3
@@ -312,9 +265,7 @@ class LlmExtractor:
             filtered_entities.append(entity)
             valid_entity_names.add(entity.text)
 
-        # Keep all extracted relations; the KnowledgeGraph will handle node creation
-        filtered_relations = result.relations
-
+        # Keep all extracted relations; KnowledgeGraph handles node creation.
         return ExtractionResult(
-            entities=filtered_entities, relations=filtered_relations
+            entities=filtered_entities, relations=result.relations
         )

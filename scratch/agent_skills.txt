@@ -1,1 +1,57 @@
-""
+"""
+
+
+# 1) Agentic "Read" (Ask Query, Return Graph Data)
+
+Tool call for user query "What is AI?"
+
+> CALL synapse_agent.query(
+>   "What is AI?",
+>   "What is artificial intelligence? Return its definition, key subfields, and
+>    notable early researchers. Limit to 5 main concepts."
+> )
+
+Neo4j Execution (Simplified):
+
+> MATCH (e:Entity {name: "Artificial Intelligence"})
+> OPTIONAL MATCH (e)<-[:MENTIONS]-(f:Fact)
+> OPTIONAL MATCH (e)-[:RELATED_TO]-(r:Entity)
+> RETURN e.name, e.description, f.content, r.name, r.description
+
+2) Agentic "Create" (Update / Insert)
+
+Tool call for user "Create a skill: Synaptic Learning"
+
+> CALL synapse_agent.update_graph(
+>   "Create a skill: Synaptic Learning",
+>   "Synaptic Learning is a memory technique that mimics neural plasticity
+>    by spacing learning intervals and reinforcing connections through
+>    retrieval practice. Add it as an Entity with type 'Skill' and a
+>    brief description."
+> )
+
+Neo4j Execution (Simplified):
+
+> MERGE (s:Entity {name: "Synaptic Learning"})
+> SET s.type = "Skill"
+> SET s.description = "Memory technique mimicking neural plasticity..."
+> WITH s
+> MERGE (e:Entity {name: "Eidetic Learning"})
+> WITH s, e
+> MERGE (s)-[:RELATED_TO {weight: 0.9}]->(e)
+
+3) Agentic "Delete" (Cleanup)
+
+Tool call for user "Delete 'Obsolete Theory'"
+
+> CALL synapse_agent.delete_item(
+>   "Delete 'Obsolete Theory'",
+>   "Delete the entity 'Obsolete Theory' and all its incoming/outgoing
+>    relationships. It is a deprecated concept no longer relevant."
+> )
+
+Neo4j Execution (Simplified):
+
+> MATCH (n:Entity {name: "Obsolete Theory"})
+> DETACH DELETE n
+"""

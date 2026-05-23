@@ -20,7 +20,12 @@ from neo4j import AsyncGraphDatabase
 from synapse_mcp.data_pipeline.semantic_integrator import SemanticIntegrator
 from synapse_mcp.core.knowledge_graph import KnowledgeGraph
 
-CLIPPINGS_DIR = Path("/home/ty/Documents/LLM-WIKI/Clippings")
+wiki_vault_path = os.getenv("WIKI_VAULT_PATH")
+if wiki_vault_path:
+    CLIPPINGS_DIR = Path(wiki_vault_path) / "Clippings"
+else:
+    CLIPPINGS_DIR = Path.home() / "Documents" / "LLM-WIKI" / "Clippings"
+
 DRY_RUN = os.getenv("DRY_RUN", "0") == "1"
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")

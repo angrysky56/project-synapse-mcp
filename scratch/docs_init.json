@@ -24,7 +24,7 @@
   },
   "monorepo_workspaces": [],
   "planning_exists": true,
-  "project_root": "/home/ty/Repositories/ai_workspace/project-synapse-mcp",
+  "project_root": "/absolute/path/to/your/project-synapse-mcp",
   "agents_installed": true,
   "missing_agents": []
 }
