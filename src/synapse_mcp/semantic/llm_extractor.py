@@ -180,7 +180,15 @@ class LlmExtractor:
         # 16384 was the value tuned for Gemma — leaves plenty of room for
         # entity-dense documents while still capping runaway generations.
         max_tokens = int(os.getenv("EXTRACTION_MAX_TOKENS", "16384"))
-        timeout = int(os.getenv("OLLAMA_TIMEOUT", "120"))
+        # Timeout precedence: per-job override > general LLM_TIMEOUT >
+        # legacy OLLAMA_TIMEOUT alias > 120s default. The OLLAMA_TIMEOUT
+        # fallback keeps existing .env files working without edits.
+        timeout = int(
+            os.getenv("EXTRACTION_LLM_TIMEOUT")
+            or os.getenv("LLM_TIMEOUT")
+            or os.getenv("OLLAMA_TIMEOUT")
+            or "120"
+        )
 
         for attempt in range(2):
             try:

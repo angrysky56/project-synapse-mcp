@@ -6,8 +6,10 @@ and generates novel insights from the knowledge graph.
 """
 
 import asyncio
+import json
 import os
 import random
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -691,7 +693,14 @@ class InsightEngine:
         )
 
         max_tokens = int(os.getenv("INSIGHT_LLM_MAX_TOKENS", "2048"))
-        timeout = int(os.getenv("INSIGHT_LLM_TIMEOUT", "60"))
+        # Precedence: per-job > general LLM_TIMEOUT > 60s default. The
+        # general LLM_TIMEOUT lets you raise/lower all LLM calls at once
+        # without juggling per-provider knobs.
+        timeout = int(
+            os.getenv("INSIGHT_LLM_TIMEOUT")
+            or os.getenv("LLM_TIMEOUT")
+            or "60"
+        )
 
         try:
             synth = await self._llm_provider.chat_json(
@@ -1095,32 +1104,44 @@ class InsightEngine:
         return evidence
 
     async def generate_insights(
-        self, topic: str | None = None, confidence_threshold: float = 0.8
+        self,
+        topic: str | None = None,
+        confidence_threshold: float = 0.8,
+        *,
+        persist: bool | None = None,
+        write_file: bool | None = None,
     ) -> list[dict[str, Any]]:
-        """
-        Generate insights on-demand for a specific topic or generally.
+        """Generate insights on-demand for a specific topic or generally.
 
         Args:
-            topic: Optional topic to focus on
-            confidence_threshold: Minimum confidence for insights
+            topic: Optional topic to focus on.
+            confidence_threshold: Minimum confidence for insights.
+            persist: If True, store each insight as a Zettel in Neo4j. If
+                None, reads ``INSIGHT_PERSIST_ON_DEMAND`` env var (default
+                ``true``). Set False to peek without polluting the graph.
+            write_file: If True, write a timestamped ``.json`` + ``.md``
+                pair to ``INSIGHTS_OUTPUT_DIR`` (default ``./data/insights``)
+                so cron jobs and standalone scripts can pick up the result
+                without holding an MCP session open. If None, reads
+                ``INSIGHT_WRITE_FILE`` env var (default ``true``).
 
         Returns:
-            list of generated insights
+            list of generated insights. Each dict gains a ``zettel_id`` from
+            Neo4j when ``persist=True`` (replaces the temporary local id).
         """
         logger.info("Generating insights for topic: %s", topic or "general")
 
-        # Refresh analysis graph
+        if persist is None:
+            persist = os.getenv("INSIGHT_PERSIST_ON_DEMAND", "true").lower() == "true"
+        if write_file is None:
+            write_file = os.getenv("INSIGHT_WRITE_FILE", "true").lower() == "true"
+
         await self._build_analysis_graph()
-
-        # Detect patterns
         patterns = await self._detect_patterns()
-
-        # Filter patterns by topic if specified
         if topic:
             patterns = await self._filter_patterns_by_topic(patterns, topic)
 
-        # Generate insights from patterns
-        insights = []
+        insights: list[dict[str, Any]] = []
         for pattern in patterns:
             try:
                 insight = await self._generate_insight_from_pattern(pattern)
@@ -1129,8 +1150,125 @@ class InsightEngine:
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.error("Failed to generate insight: %s", e)
 
+        # Persist to Neo4j. Previously only the autonomous loop did this —
+        # on-demand insights were thrown away the moment the tool returned.
+        if persist and insights:
+            persisted = 0
+            for insight in insights:
+                try:
+                    stored_id = await self.knowledge_graph.store_insight(insight)
+                    insight["zettel_id"] = stored_id
+                    persisted += 1
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    logger.warning(
+                        "Failed to persist insight %s: %s",
+                        insight.get("zettel_id", "?"),
+                        e,
+                    )
+            logger.info("Persisted %d/%d insights to knowledge graph",
+                        persisted, len(insights))
+
+        # File output — picked up by cron / external readers so they don't
+        # have to keep an MCP session alive for the full run.
+        if write_file and insights:
+            try:
+                path = self._write_insights_file(insights, topic=topic)
+                logger.info("Wrote %d insights to %s", len(insights), path)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning("Failed to write insights file: %s", e)
+
         logger.info("Generated %d insights", len(insights))
         return insights
+
+    def _write_insights_file(
+        self, insights: list[dict[str, Any]], *, topic: str | None
+    ) -> str:
+        """Write insights to a timestamped JSON + Markdown pair.
+
+        Layout::
+
+            <INSIGHTS_OUTPUT_DIR>/
+              2026-05-23T14-03-12_general.json
+              2026-05-23T14-03-12_general.md
+              latest.json          (symlink — convenient for cron readers)
+              latest.md
+
+        JSON is the source of truth; the markdown is a human-readable
+        summary derived from the same data.
+        """
+        from pathlib import Path
+
+        out_dir = Path(os.getenv("INSIGHTS_OUTPUT_DIR", "./data/insights"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        slug = (topic or "general").lower().replace(" ", "_")
+        slug = re.sub(r"[^a-z0-9_-]", "", slug) or "general"
+        base = out_dir / f"{ts}_{slug}"
+
+        payload = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "topic": topic,
+            "count": len(insights),
+            # Sanitize to JSON-serializable types — evidence may contain
+            # Neo4j datetime/etc. that json can't handle by default.
+            "insights": [self._jsonify_insight(i) for i in insights],
+        }
+        json_path = base.with_suffix(".json")
+        json_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+
+        md_lines = [
+            f"# Insights — {topic or 'general'}",
+            f"_Generated {payload['generated_at']} · {len(insights)} insight(s)_\n",
+        ]
+        for i, ins in enumerate(insights, 1):
+            md_lines.extend([
+                f"## {i}. {ins.get('title', '(untitled)')}",
+                f"**Confidence**: {ins.get('confidence', 0):.2f} · "
+                f"**Pattern**: `{ins.get('pattern_type', '?')}` · "
+                f"**Zettel**: `{ins.get('zettel_id', '?')}`\n",
+                str(ins.get("content", "")).strip(),
+                "",
+            ])
+            evidence = ins.get("evidence") or []
+            if evidence:
+                md_lines.append(f"_Evidence ({len(evidence)} fact(s)):_")
+                for e in evidence[:5]:
+                    md_lines.append(
+                        f"- {str(e.get('statement', ''))[:200]} "
+                        f"(source: `{e.get('source', '?')}`)"
+                    )
+                md_lines.append("")
+        md_path = base.with_suffix(".md")
+        md_path.write_text("\n".join(md_lines), encoding="utf-8")
+
+        # Update latest.* symlinks (best-effort — some filesystems don't
+        # support them and we don't care enough to fail).
+        for suffix in (".json", ".md"):
+            link = out_dir / f"latest{suffix}"
+            target = (base.with_suffix(suffix)).name
+            try:
+                if link.is_symlink() or link.exists():
+                    link.unlink()
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                pass
+
+        return str(json_path)
+
+    @staticmethod
+    def _jsonify_insight(insight: dict[str, Any]) -> dict[str, Any]:
+        """Coerce an insight dict to JSON-serializable primitives."""
+        safe: dict[str, Any] = {}
+        for k, v in insight.items():
+            if isinstance(v, dict | list | str | int | float | bool) or v is None:
+                safe[k] = v
+            else:
+                safe[k] = str(v)
+        return safe
 
     async def _filter_patterns_by_topic(
         self, patterns: list[dict[str, Any]], topic: str
