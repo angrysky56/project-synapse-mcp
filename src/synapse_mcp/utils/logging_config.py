@@ -158,6 +158,26 @@ def setup_logging(
 _loggers: dict[str, SynapseLogger] = {}
 
 
+def quiet_chatty_loggers() -> None:
+    """Raise the floor on third-party loggers that flood the cron log.
+
+    Neo4j 5.x emits an INFO-level ``GqlStatusObject`` notification on every
+    ``CREATE * IF NOT EXISTS`` that finds the object already present (status
+    ``00NA0`` — "no effect"). That's working-as-intended idempotency, not
+    something an operator needs to see; raise that logger to WARNING so only
+    real schema issues come through.
+
+    Idempotent — safe to call from every entrypoint (server, CLI scripts).
+    Each entrypoint should call it once after ``setup_logging`` / ``basicConfig``.
+    """
+    for name in (
+        "neo4j.notifications",
+        "neo4j.io",
+        "neo4j.pool",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def get_logger(name: str) -> SynapseLogger:
     """Get a SynapseLogger instance."""
     if name not in _loggers:

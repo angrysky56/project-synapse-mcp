@@ -34,7 +34,7 @@ from .core.temporal_facts import TemporalFact, TemporalFactStore
 from .data_pipeline.semantic_integrator import SemanticIntegrator
 from .data_pipeline.text_processor import TextProcessor
 from .semantic.montague_parser import MontagueParser
-from .utils.logging_config import setup_logging
+from .utils.logging_config import quiet_chatty_loggers, setup_logging
 from .wiki.wiki_adapter import WikiAdapter
 from .zettelkasten.insight_engine import InsightEngine
 
@@ -43,6 +43,9 @@ load_dotenv()
 
 # Configure logging for MCP (stderr only)
 logger = setup_logging(__name__)
+# Mute Neo4j's INFO-level "index/constraint already exists, IF NOT EXISTS
+# worked correctly" notifications — they're spam, not signal.
+quiet_chatty_loggers()
 
 
 class SynapseServer:

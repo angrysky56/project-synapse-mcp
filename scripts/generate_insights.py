@@ -17,19 +17,31 @@ Then a separate reader (chat agent, daily-briefing script, etc.) picks up
 ``data/insights/latest.md`` whenever it's convenient — no live session
 needed.
 
+Shutdown behavior:
+    The script ends with ``os._exit(rc)`` after writing output. Cron-fired
+    runs were hanging at ``asyncio.run`` teardown waiting for the Neo4j
+    async driver's worker pool to drain — meanwhile the cron's session-level
+    wall clock would expire and kill the process anyway. We do our own
+    cleanup explicitly and then hard-exit, since this is a one-shot batch
+    job and graceful Python shutdown buys us nothing.
+
 Exit codes:
     0  success (insights may be empty if confidence threshold not met)
     1  generation failed (Neo4j / config error)
     2  bad CLI arguments
+    3  exceeded --max-runtime soft cap (output may still be partial)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
+import signal
 import sys
+import threading
 from pathlib import Path
 
 # Allow running directly from a checkout without `uv pip install -e .`.
@@ -44,6 +56,7 @@ load_dotenv(_HERE.parent / ".env", override=False)
 
 from synapse_mcp.core.knowledge_graph import KnowledgeGraph  # noqa: E402
 from synapse_mcp.semantic.montague_parser import MontagueParser  # noqa: E402
+from synapse_mcp.utils.logging_config import quiet_chatty_loggers  # noqa: E402
 from synapse_mcp.zettelkasten.insight_engine import InsightEngine  # noqa: E402
 
 logging.basicConfig(
@@ -51,7 +64,49 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stderr,
 )
+# Mute Neo4j's "index already exists, IF NOT EXISTS worked correctly" info
+# stream and similar low-signal output — otherwise the cron log fills with
+# pages of notification objects per startup.
+quiet_chatty_loggers()
 log = logging.getLogger("generate_insights")
+
+
+# ---------------------------------------------------------------------------
+# Watchdog: hard SIGKILL via os._exit if the asyncio path can't be cancelled.
+#
+# ``_detect_patterns`` runs synchronous numpy/networkx code that doesn't yield
+# to the event loop. ``asyncio.wait_for`` can't cancel it mid-call — the
+# computation has to return on its own. The watchdog gives us a guaranteed
+# upper bound regardless of what the engine is doing.
+# ---------------------------------------------------------------------------
+def _install_hard_watchdog(seconds: int) -> None:
+    """Start a daemon timer that hard-exits the process after ``seconds``.
+
+    Uses SIGALRM on Linux (preferred — interrupts blocking syscalls) and a
+    daemon Timer thread elsewhere. The thread variant can't interrupt a
+    blocking C extension but is the best we can do off-Linux.
+    """
+    if seconds <= 0:
+        return
+
+    def _bomb() -> None:
+        log.error(
+            "Hard watchdog fired after %ds — process did not exit cleanly. "
+            "Output already on disk; killing now.",
+            seconds,
+        )
+        os._exit(3)
+
+    if hasattr(signal, "SIGALRM"):
+        signal.signal(
+            signal.SIGALRM,
+            lambda *_: _bomb(),
+        )
+        signal.alarm(seconds)
+    else:  # pragma: no cover — Windows / non-POSIX fallback
+        t = threading.Timer(seconds, _bomb)
+        t.daemon = True
+        t.start()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -85,6 +140,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print a short summary of each insight to stdout.",
     )
+    p.add_argument(
+        "--max-runtime",
+        type=int,
+        default=int(os.getenv("INSIGHT_CLI_MAX_RUNTIME", "540")),
+        help=(
+            "Soft cap on engine.generate_insights() in seconds (default 540 — "
+            "leaves headroom under a typical 600s cron wall). Set 0 to "
+            "disable. A separate hard SIGALRM fires at max_runtime + 30s as a "
+            "safety net for synchronous code that ignores asyncio cancellation."
+        ),
+    )
+    p.add_argument(
+        "--no-force-exit",
+        action="store_true",
+        help=(
+            "Don't os._exit() after work completes. Useful for tests; "
+            "harmful for cron because asyncio teardown may hang on the "
+            "Neo4j driver's worker pool."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -101,21 +176,38 @@ async def _run(args: argparse.Namespace) -> int:
         log.error("Failed to initialize Synapse components: %s", e, exc_info=True)
         return 1
 
+    insights: list = []
     try:
-        insights = await engine.generate_insights(
+        coro = engine.generate_insights(
             topic=args.topic,
             confidence_threshold=args.threshold,
             persist=not args.no_persist,
             write_file=not args.no_file,
         )
+        if args.max_runtime and args.max_runtime > 0:
+            try:
+                insights = await asyncio.wait_for(coro, timeout=args.max_runtime)
+            except asyncio.TimeoutError:
+                log.error(
+                    "engine.generate_insights() exceeded --max-runtime %ds. "
+                    "Any insights already persisted to Neo4j survive; "
+                    "the file-output step may have been skipped.",
+                    args.max_runtime,
+                )
+                return 3
+        else:
+            insights = await coro
     except Exception as e:  # pylint: disable=broad-exception-caught
         log.error("Insight generation failed: %s", e, exc_info=True)
         return 1
     finally:
-        try:
+        # Best-effort cleanup. Errors here are logged but never override the
+        # primary return code — the work was either done or not, and that's
+        # what cron cares about.
+        with contextlib.suppress(Exception):
+            await engine.cleanup()
+        with contextlib.suppress(Exception):
             await kg.close()
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            log.warning("Error closing knowledge graph: %s", e)
 
     log.info(
         "Generated %d insight(s) above threshold %.2f (topic=%s)",
@@ -137,7 +229,22 @@ def main(argv: list[str] | None = None) -> int:
         args = parse_args(argv)
     except SystemExit as e:
         return int(e.code) if isinstance(e.code, int) else 2
-    return asyncio.run(_run(args))
+
+    # 30s grace beyond the soft cap so the soft path has a chance to win.
+    if args.max_runtime and args.max_runtime > 0:
+        _install_hard_watchdog(args.max_runtime + 30)
+
+    rc = asyncio.run(_run(args))
+
+    # Cron-fired runs were hanging here on asyncio teardown — Neo4j's async
+    # driver keeps a worker pool that can take a long time to drain. We're a
+    # one-shot batch job; once the file is written and Neo4j connections
+    # closed, there's nothing left worth waiting for.
+    if not args.no_force_exit:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(rc)
+    return rc
 
 
 if __name__ == "__main__":
