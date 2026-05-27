@@ -18,7 +18,6 @@ from typing import Any
 
 import aiofiles
 import networkx as nx
-import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -189,6 +188,11 @@ class WikiAdapter:
         """Write or update a wiki page with frontmatter."""
         full = self.vault_path / rel_path
 
+        # GBrain quality.md citation + backlink convention enforcement (non-blocking)
+        convention_warnings = await self._enforce_page_conventions(rel_path, body)
+        for warn in convention_warnings:
+            logger.warning("Convention violation in %s: %s", rel_path, warn)
+
         try:
             full.parent.mkdir(parents=True, exist_ok=True)
 
@@ -207,6 +211,64 @@ class WikiAdapter:
             raise WikiAccessError(f"Permission denied writing to {rel_path}") from e
         except Exception as e:
             raise WikiError(f"Unexpected error writing to {rel_path}: {str(e)}") from e
+
+    async def _enforce_page_conventions(self, rel_path: str, body: str) -> list[str]:
+        """Check page body for GBrain citation + back-link convention violations.
+
+        Non-blocking — returns a list of warning strings, not exceptions.
+        Checks:
+          1. All [[wikilinks]] resolve to an existing page.
+          2. New pages declare at least one related page via wikilink or
+             explicit ``## Related`` / ``## Connections`` section.
+          3. Fenced fact blocks include a ``source:`` field.
+
+        Returns
+        -------
+        list[str]
+            Warning messages for each convention violation found.
+        """
+        import re as _re
+
+        warnings: list[str] = []
+        slug = rel_path.replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".md")
+
+        # --- 1. Broken wikilink detection ---
+        link_re = _re.compile(r"\[\[([^\]|#]+)(?:\|[^]]+)?\]\]")
+        wikilink_targets = link_re.findall(body)
+        for target_raw in wikilink_targets:
+            target_slug = target_raw.strip()
+            target_path = self.vault_path / "wiki" / f"{target_slug}.md"
+            if not target_path.exists():
+                warnings.append(
+                    f"Broken wikilink [[{target_slug}]] → no page found at "
+                    f"wiki/{target_slug}.md"
+                )
+
+        # --- 2. Orphan-page detection (new pages only) ---
+        full = self.vault_path / rel_path
+        if not full.exists():
+            has_related_section = bool(
+                _re.search(r"^##\s+(?:Related|Connections|Links)", body, _re.M)
+            )
+            has_outbound_links = bool(wikilink_targets)
+            if not has_related_section and not has_outbound_links:
+                warnings.append(
+                    f"New page wiki/{slug}.md has no ## Related section and no "
+                    f"outbound [[wikilinks]] — it will be an orphan. "
+                    f"Add at least one [[link]] or a ## Related section."
+                )
+
+        # --- 3. Citation enforcement for gbrain-facts blocks ---
+        fence_re = _re.compile(r"```gbrain-facts\b(.*?)```", _re.DOTALL)
+        for match in fence_re.finditer(body):
+            block_content = match.group(1)
+            if not _re.search(r"^\s*source\s*:", block_content, _re.M):
+                warnings.append(
+                    "gbrain-facts block is missing ``source:`` field — "
+                    "add ``source: <url or page>`` for citation traceability."
+                )
+
+        return warnings
 
     async def delete_page(self, rel_path: str) -> str:
         """Delete a wiki page."""
@@ -597,7 +659,7 @@ class WikiAdapter:
         sim_matrix = cosine_similarity(matrix)
         # Distance matrix for clustering
         dist_matrix = 1.0 - sim_matrix
-        np.clip(dist_matrix, 0.0, None, out=dist_matrix)  # numerical safety
+        dist_matrix.clip(min=0.0, out=dist_matrix)  # numerical safety
 
         # Auto K
         k = n_clusters or max(2, round(len(slugs) ** 0.5))

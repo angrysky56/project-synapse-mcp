@@ -365,6 +365,119 @@ async def generate_insights(
         return f"❌ Insight generation failed [{type(e).__name__}]: {str(e)}"
 
 
+# ----------------------------------------------------------------------
+# Gap analysis (GBrain pattern — no LLM)
+# ----------------------------------------------------------------------
+
+def _extract_query_dimensions(query: str) -> list[str]:
+    """Rough NLP-free dimension extraction from query tokens."""
+    q = query.lower()
+    dims: list[str] = []
+
+    temporal_signals = [
+        (r"\b(?:when|what year|what month|what day|how long|timeframe|period|duration)\b", "temporal"),
+        (r"\b(?:since|before|after|between|until|ago|recent|latest|current)\b", "temporal"),
+        (r"\b(?:202[0-9]|19[0-9]{2})\b", "temporal"),
+        (r"\b(?:yesterday|last week|last month|this week|this month|today)\b", "temporal"),
+    ]
+    for pattern, label in temporal_signals:
+        if re.search(pattern, q):
+            dims.append(label)
+            break
+
+    quantity_signals = [
+        (r"\b(?:how many|how much|how often|percentage|percent|ratio|rate|count|number|amount)\b", "quantitative"),
+        (r"\b(?:mrr|arr|revenue|users?|customers?|dau|mau|growth|cost|price|value|metric|kpi)\b", "quantitative"),
+    ]
+    for pattern, label in quantity_signals:
+        if re.search(pattern, q):
+            dims.append(label)
+            break
+
+    people_signals = [
+        (r"\b(?:who|whom|people|team|members?|employees?|founder|ceo|cto|cofounder)\b", "people"),
+        (r"\b(?:company|organization|org|team|startup|firm)\b", "organization"),
+    ]
+    for pattern, label in people_signals:
+        if re.search(pattern, q):
+            dims.append(label)
+            break
+
+    if re.search(r"\b(?:why|cause|because|reason|result|effect|impact|due to|leads to)\b", q):
+        dims.append("causal")
+
+    if re.search(r"\b(?:how relate|connected|relationship|between|link|compared|versus|vs)\b", q):
+        dims.append("relational")
+
+    # Temporal: override only if explicit time signal (not just "last" alone)
+    # Don't flag "last quarter" as temporal unless it's paired with actual date signal
+    has_explicit_time = bool(
+        re.search(r"\b(?:202[0-9]|19[0-9]{2}|yesterday|last week|last month|this week|this month|today)\b", q)
+    )
+    if "temporal" in dims and not has_explicit_time:
+        dims.remove("temporal")
+
+    return dims
+
+
+def _analyze_gaps(
+    query: str, facts: list[dict[str, Any]], insights: list[dict[str, Any]]
+) -> list[str]:
+    """Detect knowledge gaps the query asks about but the KB doesn't satisfy."""
+    import re as _re
+
+    if not query.strip():
+        return []
+
+    dims = _extract_query_dimensions(query)
+    if not dims:
+        return []
+
+    gaps: list[str] = []
+    # Keep originals for person-name detection; lower for keyword checks
+    fact_texts_lower = {f.get("statement", "").lower() for f in facts}
+    insight_texts_lower = {i.get("content", "").lower() for i in insights}
+    fact_texts_raw = {f.get("statement", "") for f in facts}
+    insight_texts_raw = {i.get("content", "") for i in insights}
+    all_text_lower = " ".join(fact_texts_lower | insight_texts_lower)
+    all_text_raw = " ".join(fact_texts_raw | insight_texts_raw)
+
+    for dim in dims:
+        if dim == "temporal":
+            if not _re.search(r"\b(202[0-9]|19[0-9]{2}|[A-Z][a-z]+ \d{1,2},? \d{4})\b", all_text_lower):
+                gaps.append(
+                    "No temporal anchors (dates/periods) found for this query. "
+                    "Consider adding a timeline entry or `date:` field to relevant entity pages."
+                )
+        elif dim == "quantitative":
+            if not _re.search(r"\b\d+(?:\.\d+)?[%$]?\b", all_text_lower):
+                gaps.append(
+                    "No quantitative data found. If you have metrics, try adding "
+                    "a `gbrain-facts` block with metric: value unit: period: fields."
+                )
+        elif dim == "people":
+            # Title-case two-word sequences (first and last names) in raw text
+            if not _re.search(r"\b[A-Z][a-z]+ [A-Z][a-z]+\b", all_text_raw):
+                gaps.append(
+                    "No person entities found. If the query involves people, "
+                    "consider enriching relevant entity pages."
+                )
+        elif dim == "causal":
+            if not _re.search(r"\b(because|caused|leads to|result|therefore|due to|reason)\b", all_text_lower):
+                gaps.append(
+                    "No causal links found. Try using synapse_remember with "
+                    "predicate: caused to record causal chains."
+                )
+        elif dim == "relational":
+            if not _re.search(r"\b(connects?|relates?|linked|associated|related)\b", all_text_lower):
+                gaps.append(
+                    "No relationship data found. Try explore_connections to map "
+                    "the relationship graph for the relevant entities."
+                )
+
+    return gaps
+
+
 @mcp.tool()
 async def query_knowledge(
     ctx: Context, query: str, include_insights: bool = True, max_results: int = 10
@@ -464,6 +577,16 @@ async def query_knowledge(
             result_buffer.append("**🔗 Related Wiki Pages:**\n\n")
             for link_line in wiki_context:
                 result_buffer.append(f"- {link_line}\n")
+            result_buffer.append("\n")
+
+        # --- Stage 5: Gap analysis (GBrain pattern — no LLM) ---
+        # Detect what factual dimensions the query asks about but we have
+        # no/weak evidence for.  Pattern from GBrain synthesis layer.
+        gaps = _analyze_gaps(query, merged_facts, insights)
+        if gaps:
+            result_buffer.append("**⚠️ Gaps (what we don't know yet):**\n\n")
+            for gap in gaps:
+                result_buffer.append(f"- {gap}\n")
             result_buffer.append("\n")
 
         if not insights and not merged_facts:

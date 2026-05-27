@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from ..knowledge.knowledge_types import KnowledgeUtils
+from ..semantic.fence_extractor import FenceExtractionResult, extract_facts_from_text
 from ..semantic.llm_extractor import LlmExtractor
 from ..semantic.montague_parser import MontagueParser
 from ..utils.logging_config import get_logger
@@ -104,6 +105,100 @@ class SemanticIntegrator:
 
         # Start with basic text processing
         processed_data = await self._basic_text_processing(text, source, metadata)
+
+        # 0. Fence-first: extract structured gbrain-facts BEFORE any LLM call.
+        #    Fence facts are deterministic (regex only) and carry confidence=1.0.
+        #    This is the +31.4pt P@5 source — never skip it.
+        source_slug = (metadata or {}).get("slug", source)
+        fence_result: FenceExtractionResult = extract_facts_from_text(
+            text, source_slug=source_slug
+        )
+        if fence_result.facts:
+            logger.debug(
+                "Fence extraction found %d structured facts", len(fence_result.facts)
+            )
+            fence_entities: list[dict[str, Any]] = []
+            for pf in fence_result.facts:
+                # Convert ParsedFact → entity if it has a subject
+                if pf.subject:
+                    from ..knowledge.knowledge_types import KnowledgeUtils
+
+                    ent_id = KnowledgeUtils.generate_entity_id(
+                        pf.subject, pf.kind.title()
+                    )
+                    ent = {
+                        "id": ent_id,
+                        "name": pf.subject,
+                        "type": pf.kind.title(),
+                        "confidence": pf.confidence,
+                        "source": f"fence:{source_slug}",
+                        "properties": {"extraction": "gbrain-fence"},
+                    }
+                    processed_data["entities"].append(ent)
+                    fence_entities.append(ent)
+                # Convert ParsedFact → fact in the pipeline format
+                fact_id = f"fence_{source_slug}_{pf.row_num}"
+                # Build human-readable content
+                if pf.kind == "metric":
+                    content = f"{pf.subject} {pf.predicate or 'has'} {pf.value} {pf.unit} ({pf.period})"
+                elif pf.kind == "event":
+                    content = f"{pf.event_type}: {pf.subject} {pf.object}"
+                else:
+                    content = f"{pf.subject} {pf.predicate} {pf.object}".strip()
+                fact = {
+                    "id": fact_id,
+                    "content": content or str(pf.raw),
+                    "logical_form": f"gbrain_fence({pf.kind})",
+                    "confidence": pf.confidence,
+                    "source": f"fence:{source_slug}",
+                    "metadata": {
+                        "extraction": "gbrain-fence",
+                        "kind": pf.kind,
+                        "strikethrough": pf.strikethrough,
+                        "valid_from": str(pf.valid_from) if pf.valid_from else "",
+                        "valid_until": str(pf.valid_until) if pf.valid_until else "",
+                        "raw": pf.raw,
+                    },
+                    "entities": [
+                        e["id"] for e in fence_entities if e["name"] == pf.subject
+                    ],
+                }
+                processed_data["facts"].append(fact)
+                # Emit a relationship if subject+object are both present
+                if pf.subject and pf.object:
+                    from ..knowledge.knowledge_types import KnowledgeUtils
+
+                    subj_id = KnowledgeUtils.generate_entity_id(
+                        pf.subject, pf.kind.title()
+                    )
+                    obj_id = KnowledgeUtils.generate_entity_id(pf.object, "Object")
+                    rel = {
+                        "source_id": subj_id,
+                        "target_id": obj_id,
+                        "type": "FENCE_RELATED",
+                        "confidence": pf.confidence,
+                        "source": f"fence:{source_slug}",
+                        "properties": {"predicate": pf.predicate, "kind": pf.kind},
+                    }
+                    processed_data["relationships"].append(rel)
+            logger.info(
+                "Fence extraction: %d entities, %d relationships, %d facts",
+                len(fence_entities),
+                len(
+                    [
+                        r
+                        for r in processed_data["relationships"]
+                        if r["source"].startswith("fence:")
+                    ]
+                ),
+                len(
+                    [
+                        f
+                        for f in processed_data["facts"]
+                        if f["source"].startswith("fence:")
+                    ]
+                ),
+            )
 
         # Add semantic analysis if Montague parser is available
         if self.montague_parser and self.montague_parser.nlp:
