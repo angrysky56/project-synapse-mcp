@@ -702,7 +702,8 @@ class WikiAdapter:
                 {
                     "id": cid,
                     "pages": members,
-                    "missing_links": missing,
+                    "missing_links": missing[:15],
+                    "total_missing_links": len(missing),
                 }
             )
 

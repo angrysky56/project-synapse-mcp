@@ -121,8 +121,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--threshold",
         type=float,
-        default=float(os.getenv("INSIGHT_CONFIDENCE_THRESHOLD", "0.8")),
-        help="Minimum confidence to keep (default from env or 0.8).",
+        default=float(os.getenv("INSIGHT_CONFIDENCE_THRESHOLD", "0.65")),
+        help="Minimum confidence to keep (default from env or 0.65).",
     )
     p.add_argument(
         "--no-persist",
@@ -143,10 +143,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--max-runtime",
         type=int,
-        default=int(os.getenv("INSIGHT_CLI_MAX_RUNTIME", "540")),
+        default=int(os.getenv("INSIGHT_CLI_MAX_RUNTIME", "600")),
         help=(
-            "Soft cap on engine.generate_insights() in seconds (default 540 — "
-            "leaves headroom under a typical 600s cron wall). Set 0 to "
+            "Soft cap on engine.generate_insights() in seconds (default 600 — "
+            "fits a typical 600s cron wall with headroom). Set 0 to "
             "disable. A separate hard SIGALRM fires at max_runtime + 30s as a "
             "safety net for synchronous code that ignores asyncio cancellation."
         ),

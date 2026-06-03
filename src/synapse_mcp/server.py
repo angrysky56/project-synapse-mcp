@@ -369,16 +369,26 @@ async def generate_insights(
 # Gap analysis (GBrain pattern — no LLM)
 # ----------------------------------------------------------------------
 
+
 def _extract_query_dimensions(query: str) -> list[str]:
     """Rough NLP-free dimension extraction from query tokens."""
     q = query.lower()
     dims: list[str] = []
 
     temporal_signals = [
-        (r"\b(?:when|what year|what month|what day|how long|timeframe|period|duration)\b", "temporal"),
-        (r"\b(?:since|before|after|between|until|ago|recent|latest|current)\b", "temporal"),
+        (
+            r"\b(?:when|what year|what month|what day|how long|timeframe|period|duration)\b",
+            "temporal",
+        ),
+        (
+            r"\b(?:since|before|after|between|until|ago|recent|latest|current)\b",
+            "temporal",
+        ),
         (r"\b(?:202[0-9]|19[0-9]{2})\b", "temporal"),
-        (r"\b(?:yesterday|last week|last month|this week|this month|today)\b", "temporal"),
+        (
+            r"\b(?:yesterday|last week|last month|this week|this month|today)\b",
+            "temporal",
+        ),
     ]
     for pattern, label in temporal_signals:
         if re.search(pattern, q):
@@ -386,8 +396,14 @@ def _extract_query_dimensions(query: str) -> list[str]:
             break
 
     quantity_signals = [
-        (r"\b(?:how many|how much|how often|percentage|percent|ratio|rate|count|number|amount)\b", "quantitative"),
-        (r"\b(?:mrr|arr|revenue|users?|customers?|dau|mau|growth|cost|price|value|metric|kpi)\b", "quantitative"),
+        (
+            r"\b(?:how many|how much|how often|percentage|percent|ratio|rate|count|number|amount)\b",
+            "quantitative",
+        ),
+        (
+            r"\b(?:mrr|arr|revenue|users?|customers?|dau|mau|growth|cost|price|value|metric|kpi)\b",
+            "quantitative",
+        ),
     ]
     for pattern, label in quantity_signals:
         if re.search(pattern, q):
@@ -395,7 +411,10 @@ def _extract_query_dimensions(query: str) -> list[str]:
             break
 
     people_signals = [
-        (r"\b(?:who|whom|people|team|members?|employees?|founder|ceo|cto|cofounder)\b", "people"),
+        (
+            r"\b(?:who|whom|people|team|members?|employees?|founder|ceo|cto|cofounder)\b",
+            "people",
+        ),
         (r"\b(?:company|organization|org|team|startup|firm)\b", "organization"),
     ]
     for pattern, label in people_signals:
@@ -403,16 +422,23 @@ def _extract_query_dimensions(query: str) -> list[str]:
             dims.append(label)
             break
 
-    if re.search(r"\b(?:why|cause|because|reason|result|effect|impact|due to|leads to)\b", q):
+    if re.search(
+        r"\b(?:why|cause|because|reason|result|effect|impact|due to|leads to)\b", q
+    ):
         dims.append("causal")
 
-    if re.search(r"\b(?:how relate|connected|relationship|between|link|compared|versus|vs)\b", q):
+    if re.search(
+        r"\b(?:how relate|connected|relationship|between|link|compared|versus|vs)\b", q
+    ):
         dims.append("relational")
 
     # Temporal: override only if explicit time signal (not just "last" alone)
     # Don't flag "last quarter" as temporal unless it's paired with actual date signal
     has_explicit_time = bool(
-        re.search(r"\b(?:202[0-9]|19[0-9]{2}|yesterday|last week|last month|this week|this month|today)\b", q)
+        re.search(
+            r"\b(?:202[0-9]|19[0-9]{2}|yesterday|last week|last month|this week|this month|today)\b",
+            q,
+        )
     )
     if "temporal" in dims and not has_explicit_time:
         dims.remove("temporal")
@@ -444,7 +470,9 @@ def _analyze_gaps(
 
     for dim in dims:
         if dim == "temporal":
-            if not _re.search(r"\b(202[0-9]|19[0-9]{2}|[A-Z][a-z]+ \d{1,2},? \d{4})\b", all_text_lower):
+            if not _re.search(
+                r"\b(202[0-9]|19[0-9]{2}|[A-Z][a-z]+ \d{1,2},? \d{4})\b", all_text_lower
+            ):
                 gaps.append(
                     "No temporal anchors (dates/periods) found for this query. "
                     "Consider adding a timeline entry or `date:` field to relevant entity pages."
@@ -463,13 +491,18 @@ def _analyze_gaps(
                     "consider enriching relevant entity pages."
                 )
         elif dim == "causal":
-            if not _re.search(r"\b(because|caused|leads to|result|therefore|due to|reason)\b", all_text_lower):
+            if not _re.search(
+                r"\b(because|caused|leads to|result|therefore|due to|reason)\b",
+                all_text_lower,
+            ):
                 gaps.append(
                     "No causal links found. Try using synapse_remember with "
                     "predicate: caused to record causal chains."
                 )
         elif dim == "relational":
-            if not _re.search(r"\b(connects?|relates?|linked|associated|related)\b", all_text_lower):
+            if not _re.search(
+                r"\b(connects?|relates?|linked|associated|related)\b", all_text_lower
+            ):
                 gaps.append(
                     "No relationship data found. Try explore_connections to map "
                     "the relationship graph for the relevant entities."
@@ -971,6 +1004,13 @@ async def wiki_cluster_pages(ctx: Context, n_clusters: int | None = None) -> str
             if cluster["missing_links"]:
                 for a, b in cluster["missing_links"]:
                     lines.append(f"  ⚠️  Missing link: [[{a}]] ↔ [[{b}]]")
+                total = cluster.get(
+                    "total_missing_links", len(cluster["missing_links"])
+                )
+                if total > len(cluster["missing_links"]):
+                    lines.append(
+                        f"  ... and {total - len(cluster['missing_links'])} more missing links in this cluster."
+                    )
         if result["merge_candidates"]:
             lines.append("\n**Merge candidates** (similarity > 0.7):\n")
             for a, b, sim in result["merge_candidates"]:

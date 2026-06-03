@@ -1,5 +1,3 @@
-import asyncio
-import os
 from pathlib import Path
 
 import pytest
@@ -99,7 +97,7 @@ async def test_list_pages_resilience(temp_vault):
     page1.write_text("---\ntitle: Page 1\n---\nBody 1")
 
     # Mock rglob to return a file that we will delete before it's read
-    real_rglob = Path.rglob
+    _real_rglob = Path.rglob
 
     def mock_rglob(self, pattern):
         yield page1
@@ -126,3 +124,26 @@ async def test_list_pages_resilience(temp_vault):
     pages = await adapter.list_pages("wiki")
     assert len(pages) == 1
     assert pages[0]["name"] == "page1"
+
+
+@pytest.mark.asyncio
+async def test_cluster_wiki_pages_capping(temp_vault):
+    """Test that cluster_wiki_pages correctly caps missing links."""
+    adapter = WikiAdapter(vault_path=str(temp_vault))
+    await adapter.initialize()
+
+    # Create 20 pages in wiki with no links between them so they generate a lot of missing links
+    for i in range(20):
+        page_path = adapter.wiki_dir / f"page_{i}.md"
+        page_path.write_text(f"---\ntitle: Page {i}\nsummary: Summary {i}\n---\nThis is body content for page {i} to ensure we have enough similarity and words to cluster.")
+
+    # Run clustering with 1 cluster so all pages end in the same cluster
+    result = await adapter.cluster_wiki_pages(n_clusters=1)
+
+    assert len(result["clusters"]) == 1
+    cluster = result["clusters"][0]
+
+    # Cap is 15
+    assert len(cluster["missing_links"]) <= 15
+    # Total missing links should be 20 * 19 / 2 = 190
+    assert cluster["total_missing_links"] == 190

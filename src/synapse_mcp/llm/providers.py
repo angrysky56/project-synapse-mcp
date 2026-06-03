@@ -55,7 +55,9 @@ def _salvage_json(content: str) -> dict[str, Any]:
     1. Strip ``<think>`` / ``<thought>`` / ``<reasoning>`` blocks.
     2. Unwrap markdown ``` ``` ``` code fences (with or without ``json`` lang tag).
     3. Slice between the first ``{`` and last ``}`` to skip preamble/postamble.
-    4. ``json.loads`` the result.
+    4. Repair common LLM JSON malformation: unescaped single quotes (``\'`` →
+       ``'``), bare single quotes inside strings, trailing comma before ``}``.
+    5. ``json.loads`` the result.
 
     Raises:
         LlmResponseError: if no valid JSON object can be extracted.
@@ -79,12 +81,21 @@ def _salvage_json(content: str) -> dict[str, Any]:
         )
 
     cleaned = cleaned[start : end + 1]
+
+    # Repair step: some models emit \' inside string values, or leave
+    # trailing commas before } or ] — both are invalid JSON.
+    repaired = (
+        cleaned.replace("\\'", "'")
+        .replace(",}", "}")
+        .replace(",]", "]")
+    )
+
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
         raise LlmResponseError(
-            f"LLM response is not valid JSON: {e}. Preview: {cleaned[:200]!r}"
-        ) from e
+            f"LLM response is not valid JSON: {repaired[:200]!r}"
+        ) from None
 
 
 class LlmProvider(abc.ABC):

@@ -153,7 +153,7 @@ class InsightEngine:
 
         # Insight generation settings
         self.confidence_threshold = float(
-            os.getenv("INSIGHT_CONFIDENCE_THRESHOLD", "0.8")
+            os.getenv("INSIGHT_CONFIDENCE_THRESHOLD", "0.65")
         )
         self.link_threshold = float(os.getenv("LINK_THRESHOLD", "0.7"))
         self.logger = logger
@@ -421,22 +421,17 @@ class InsightEngine:
             # Calculate different centrality measures
             centralities: dict[str, dict[Any, float]] = {}
 
-            try:
-                centralities["betweenness"] = nx.betweenness_centrality(self.graph)
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.debug("Betweenness centrality failed: %s", e)
-
+            # NOTE: betweenness_centrality is O(V*E) and hangs indefinitely on
+            # graphs > ~10K nodes with dense-ish topologies — the sync NetworkX
+            # call blocks the event loop with no way to cancel it. Pagerank
+            # (power iteration, O(E) per iteration) completes in ~0.2s on the
+            # same graph and provides comparable node-importance rankings.
+            # Eigenvector centrality is O(V³) (full eigendecomp) and also hangs.
+            # Result: only pagerank survives as the centrality measure here.
             try:
                 centralities["pagerank"] = nx.pagerank(self.graph)
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug("PageRank centrality failed: %s", e)
-
-            try:
-                centralities["eigenvector"] = nx.eigenvector_centrality_numpy(
-                    self.graph
-                )
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.debug("Eigenvector centrality failed: %s", e)
 
             for measure_name, centrality_dict in centralities.items():
                 # Find top nodes for each centrality measure
@@ -473,13 +468,21 @@ class InsightEngine:
         try:
             nodes = list(self.graph.nodes())
 
-            # Sample pairs of nodes to avoid exponential complexity
+            # NOTE: the original list comprehension
+            # `[(a, b) for a in nodes for b in nodes if a != b]` materializes
+            # O(V²) pairs (~780 M entries for V=28 K) before sampling 50 — this
+            # hangs the process on large graphs.  We replace it with a direct
+            # `random.sample` over the nodes list, which constructs only the
+            # 50 sampled pairs in memory.
             if len(nodes) > 20:
-                # Use SystemRandom for security linting compliance if needed
-                secure_random = random.SystemRandom()
-                sample_pairs = secure_random.sample(
-                    [(a, b) for a in nodes for b in nodes if a != b], 50
-                )
+                sample_pairs = [
+                    (a, b)
+                    for a, b in zip(
+                        random.sample(nodes, 50),
+                        random.sample(nodes, 50),
+                    )
+                    if a != b
+                ]
             else:
                 sample_pairs = [(a, b) for a in nodes for b in nodes if a != b]
 
@@ -1140,6 +1143,21 @@ class InsightEngine:
         patterns = await self._detect_patterns()
         if topic:
             patterns = await self._filter_patterns_by_topic(patterns, topic)
+
+        # Cap patterns to prevent runaway synthesis that exceeds the CLI's
+        # max-runtime budget. With ~1500 communities and each requiring multiple
+        # Neo4j queries (entity names + evidence) before the LLM call, full
+        # processing can take hours. A cap lets the pipeline complete fast
+        # enough to stay within the 540s soft limit.
+        max_patterns = int(os.getenv("INSIGHT_MAX_PATTERNS", "50"))
+        if len(patterns) > max_patterns:
+            logger.warning(
+                "Capping %d detected patterns to %d to prevent timeout. "
+                "Set INSIGHT_MAX_PATTERNS to increase.",
+                len(patterns),
+                max_patterns,
+            )
+            patterns = patterns[:max_patterns]
 
         insights: list[dict[str, Any]] = []
         for pattern in patterns:
