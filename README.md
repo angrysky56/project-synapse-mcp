@@ -211,12 +211,13 @@ Add to your MCP config:
 |---|---|
 | `wiki_fetch_url` | Fetch URL → defuddle clean → ingest → archive to Clippings/ |
 | `wiki_ingest_raw` | Ingest file from raw/ → Neo4j + auto-move to Clippings/ |
-| `wiki_write_page` | Create/update wiki page with frontmatter |
-| `wiki_read_page` | Read a wiki page by path |
-| `wiki_search` | Keyword search across wiki pages |
-| `wiki_list_pages` | List all pages in a subdirectory |
-| `wiki_update_index` | Rebuild the wiki index |
-| `wiki_lint` | Health check: orphans, broken links, missing frontmatter |
+| `wiki_write_page` | Create/update wiki page with frontmatter (updates index write-through) |
+| `wiki_read_page` | Read a wiki page by path supporting `mode` (meta, excerpt, full) |
+| `wiki_search` | Keyword search across wiki pages returning excerpts and snippets |
+| `wiki_list_pages` | List pages in a subdirectory with paginated `limit`, `offset`, and `tag` filters |
+| `wiki_update_index` | Rebuild the wiki index (`index.md`) |
+| `wiki_sync_index` | Manually sync/refresh the DuckDB page index database from disk |
+| `wiki_lint` | Health check: orphans, broken links, missing/invalid frontmatter (runs via SQL) |
 
 ## Wiki Vault Structure
 

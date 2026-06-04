@@ -68,6 +68,7 @@ The bridge to a physical Zettelkasten (Obsidian vault).
 - **Frontmatter Management**: Synchronizes graph metadata with Markdown files.
 - **Index Generation**: Automatically builds and maintains a `SUMMARY.md` and topic clusters.
 - **Vault Integrity**: Performs health checks to detect orphaned pages or broken links.
+- **DuckDB Vault Index**: Backed by a local DuckDB cache (`.synapse/vault_index.duckdb`) providing fast incremental synchronization, paginated queries, and database-based keyword searches.
 
 ### 2.4. Insight Engine
 The autonomous synthesis layer.

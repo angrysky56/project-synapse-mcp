@@ -9,7 +9,7 @@ Provides tools for:
   - Listing and searching wiki pages via the index
 """
 
-import hashlib
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -30,60 +30,15 @@ from ..utils.exceptions import (
     WikiPageNotFoundError,
 )
 from ..utils.logging_config import get_logger
+from .parser import build_frontmatter, parse_frontmatter
+from .vault_index import VaultIndex
 
 logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Frontmatter helpers
+# Frontmatter helpers are imported from .parser
 # ---------------------------------------------------------------------------
-
-
-def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
-    """Parse YAML frontmatter from markdown content.
-
-    Returns:
-        Tuple of (metadata dict, body text without frontmatter).
-    """
-    if not content.startswith("---"):
-        return {}, content
-
-    end = content.find("---", 3)
-    if end == -1:
-        return {}, content
-
-    raw = content[3:end].strip()
-    meta: dict[str, Any] = {}
-    for line in raw.split("\n"):
-        if ":" in line:
-            key, _, val = line.partition(":")
-            key = key.strip()
-            # Use a separate variable to avoid type shadowing/reassignment error
-            cleaned_val: str | list[str] = val.strip().strip('"').strip("'")
-            if (
-                isinstance(cleaned_val, str)
-                and cleaned_val.startswith("[")
-                and cleaned_val.endswith("]")
-            ):
-                cleaned_val = [
-                    v.strip().strip('"').strip("'")
-                    for v in cleaned_val[1:-1].split(",")
-                    if v.strip()
-                ]
-            meta[key] = cleaned_val
-    return meta, content[end + 3 :].strip()
-
-
-def build_frontmatter(meta: dict[str, Any]) -> str:
-    """Serialize a metadata dict into YAML frontmatter."""
-    lines = ["---"]
-    for k, v in meta.items():
-        if isinstance(v, list):
-            lines.append(f"{k}: [{', '.join(str(i) for i in v)}]")
-        else:
-            lines.append(f"{k}: {v}")
-    lines.append("---")
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +58,7 @@ class WikiAdapter:
         self.schema_path = self.vault_path / "CLAUDE.md"
         self.index_path = self.wiki_dir / "index.md"
         self.log_path = self.wiki_dir / "log.md"
+        self.vault_index = VaultIndex(self.vault_path)
         self.logger = logger
 
     @logger.timer()
@@ -113,6 +69,8 @@ class WikiAdapter:
             return
         for d in [self.raw_dir, self.wiki_dir]:
             d.mkdir(parents=True, exist_ok=True)
+        await self.vault_index.initialize()
+        await self.vault_index.sync()
         await self.check_health()
         logger.info("Wiki adapter initialised – vault: %s", self.vault_path)
 
@@ -141,27 +99,19 @@ class WikiAdapter:
     # ------------------------------------------------------------------
 
     @logger.timer()
-    async def list_pages(self, subdir: str = "wiki") -> list[dict[str, Any]]:
-        """List all .md pages in a vault subdirectory with frontmatter metadata."""
-        target = self.vault_path / subdir
-        if not target.exists():
-            return []
-
-        pages: list[dict[str, Any]] = []
-        # Use a list to avoid issues if files are deleted during iteration
-        file_list = sorted(target.rglob("*.md"))
-
-        for p in file_list:
-            try:
-                rel = p.relative_to(self.vault_path)
-                async with aiofiles.open(p, encoding="utf-8") as f:
-                    content = await f.read()
-                meta, _ = parse_frontmatter(content)
-                pages.append({"path": str(rel), "name": p.stem, **meta})
-            except (FileNotFoundError, PermissionError) as e:
-                logger.warning(f"Skipping page {p} due to access error: {e}")
-                continue
-        return pages
+    async def list_pages(
+        self,
+        subdir: str = "wiki",
+        limit: int = 10000,
+        offset: int = 0,
+        tag: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List all .md pages in a vault subdirectory via the index."""
+        await self.vault_index.sync()
+        res = await self.vault_index.list_pages(
+            subdir=subdir, limit=limit, offset=offset, tag=tag
+        )
+        return res["pages"]
 
     async def read_page(self, rel_path: str) -> dict[str, Any]:
         """Read a wiki page and return metadata + body."""
@@ -206,6 +156,7 @@ class WikiAdapter:
             async with aiofiles.open(full, "w", encoding="utf-8") as f:
                 await f.write(content)
             logger.info("Wrote wiki page: %s", rel_path)
+            await self.vault_index.upsert_page(rel_path)
             return f"Wrote {rel_path}"
         except PermissionError as e:
             raise WikiAccessError(f"Permission denied writing to {rel_path}") from e
@@ -275,6 +226,7 @@ class WikiAdapter:
         full = self.vault_path / rel_path
         if full.exists():
             full.unlink()
+            await self.vault_index.remove_page(rel_path)
             return f"Deleted {rel_path}"
         return f"Not found: {rel_path}"
 
@@ -284,33 +236,16 @@ class WikiAdapter:
 
     @logger.timer()
     async def search_pages(
-        self, query: str, subdir: str = "wiki"
+        self, query: str, subdir: str = "wiki", limit: int = 10
     ) -> list[dict[str, Any]]:
-        """Simple keyword search across wiki pages (case-insensitive)."""
-        results: list[dict[str, Any]] = []
-        target = self.vault_path / subdir
-        if not target.exists():
-            return results
-        terms = query.lower().split()
-        for p in target.rglob("*.md"):
-            try:
-                async with aiofiles.open(p, encoding="utf-8") as f:
-                    content = (await f.read()).lower()
-                if all(t in content for t in terms):
-                    rel = str(p.relative_to(self.vault_path))
-                    results.append({"path": rel, "name": p.stem})
-            except (FileNotFoundError, PermissionError):
-                continue
-        return results
+        """Search wiki pages using the index."""
+        return await self.vault_index.search(query, subdir=subdir, limit=limit)
 
     @logger.timer()
     async def update_index(self, deep: bool = False) -> str:
-        """Rebuild wiki/index.md from all wiki pages.
+        """Rebuild wiki/index.md from all indexed pages."""
+        await self.vault_index.sync()
 
-        Args:
-            deep: If True, performs a disk-level verification of all indexed files
-                  and runs a linting pass to identify other inconsistencies.
-        """
         if deep:
             logger.info("Performing deep index refresh and health check")
             report = await self.lint()
@@ -319,7 +254,10 @@ class WikiAdapter:
                 f"{len(report['orphan_pages'])} orphan pages found."
             )
 
-        pages = await self.list_pages("wiki")
+        pages = await self.vault_index._query_dicts(
+            "SELECT name, summary FROM pages WHERE is_operational = FALSE"
+        )
+
         lines = [
             "---",
             f"updated: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
@@ -334,17 +272,7 @@ class WikiAdapter:
         for pg in pages:
             if pg["name"] in ("index", "log"):
                 continue
-
-            # Verify file exists on disk if deep mode is on (though list_pages already did this)
-            if deep:
-                full_path = self.vault_path / pg["path"]
-                if not full_path.exists():
-                    logger.warning(
-                        f"Indexed page {pg['path']} missing from disk, skipping"
-                    )
-                    continue
-
-            summary = pg.get("summary", "")
+            summary = pg.get("summary") or ""
             lines.append(f"- [[{pg['name']}]] — {summary}")
             indexed_count += 1
 
@@ -367,7 +295,21 @@ class WikiAdapter:
     # ------------------------------------------------------------------
 
     async def append_log(self, action: str, details: str) -> str:
-        """Append an entry to wiki/log.md."""
+        """Append an entry to wiki/log.md.
+
+        Defensive size guard: log.md is append-only and read by Obsidian, which
+        chokes on very large files. Any single entry's details are capped so a
+        caller accidentally passing a huge body (e.g. a full lint report) can no
+        longer bloat the log. The full data should be the tool's return value,
+        not the log entry.
+        """
+        max_detail_chars = 2000
+        if details and len(details) > max_detail_chars:
+            details = (
+                details[:max_detail_chars]
+                + f"\n…(truncated {len(details) - max_detail_chars} chars; "
+                "full output is the tool's return value, not logged)"
+            )
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         entry = f"\n## [{now}] {action}\n\n{details}\n"
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -385,205 +327,65 @@ class WikiAdapter:
 
     @logger.timer()
     async def lint(self) -> dict[str, Any]:
-        """Run a health check on the wiki vault.
-
-        Checks for:
-        - Orphan pages (no inbound wikilinks)
-        - Broken wikilinks (target page missing)
-        - Pages missing frontmatter
-        - Missing index entries
-        """
-        pages = await self.list_pages("wiki")
-        page_names = {pg["name"] for pg in pages}
-
-        # Build normalized lookup: lowercase, spaces↔hyphens, stripped
-        def _normalize(name: str) -> str:
-            return name.lower().replace(" ", "-").replace("_", "-").strip()
-
-        normalized_lookup: set[str] = {_normalize(n) for n in page_names}
-
-        # Collect all outbound wikilinks and inbound counts
-        link_re = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
-        # Strip code fences and inline code before scanning for links
-        code_fence_re = re.compile(r"```.*?```", re.DOTALL)
-        inline_code_re = re.compile(r"`[^`]+`")
-        inbound: dict[str, int] = {name: 0 for name in page_names}
-        broken_links: list[dict[str, Any]] = []
-        missing_frontmatter: list[str] = []
-        # outbound: slug → {(target_slug, in_connections_section)}
-        outbound: dict[str, set[str]] = {}
-
-        for pg in pages:
-            # Exclude log.md — it contains raw historical entries with wikilink
-            # text that are not real links, always producing false positives.
-            if pg["name"] in ("log", "index"):
-                continue
-            data = await self.read_page(pg["path"])
-            body = data.get("body", "")
-            # Strip code fences and inline code so examples don't register as links
-            body_clean = code_fence_re.sub("", body)
-            body_clean = inline_code_re.sub("", body_clean)
-            meta = data.get("metadata", {})
-            slug = pg["name"]
-            if not meta:
-                missing_frontmatter.append(pg["path"])
-
-            # Link properties
-            outbound[slug] = set()
-            for match in link_re.finditer(body_clean):
-                target = match.group(1).strip()
-                norm_target = _normalize(target)
-                matched = False
-                for pname in page_names:
-                    if _normalize(pname) == norm_target:
-                        inbound[pname] += 1
-                        outbound[slug].add(_normalize(pname))
-                        matched = True
-                        break
-                if not matched and norm_target not in normalized_lookup:
-                    broken_links.append({"source": pg["path"], "target": target})
-
-        orphans = [
-            name
-            for name, count in inbound.items()
-            if count == 0 and name not in ("index", "log")
-        ]
-
-        # --- Reciprocal link check (concept/entity pages, Connections section) ---
-        concept_entity_slugs = {
-            pg["name"]
-            for pg in pages
-            if pg["path"].startswith(("wiki/concepts/", "wiki/entities/"))
-            and pg["name"] not in ("index", "log", "tag-taxonomy")
-        }
-        non_reciprocal: list[dict[str, str]] = []
-        for slug_a in concept_entity_slugs:
-            for slug_b in outbound.get(slug_a, set()) & concept_entity_slugs:
-                if slug_a not in outbound.get(slug_b, set()):
-                    non_reciprocal.append(
-                        {"source": slug_a, "missing_back_link": slug_b}
-                    )
-
-        # --- Tag consistency check ---
-        non_preferred_tags: list[dict[str, Any]] = []
-        use_map = await self._load_tag_taxonomy()
-        if use_map:
-            for pg in pages:
-                data = await self.read_page(pg["path"])
-                meta = data.get("metadata", {})
-                raw_tags = meta.get("tags", [])
-                if isinstance(raw_tags, str):
-                    raw_tags = [t.strip() for t in raw_tags.strip("[]").split(",")]
-                for tag in raw_tags:
-                    tag = tag.strip()
-                    if tag in use_map:
-                        non_preferred_tags.append(
-                            {
-                                "page": pg["path"],
-                                "tag": tag,
-                                "use_instead": use_map[tag],
-                            }
-                        )
-
-        return {
-            "total_pages": len(pages),
-            "orphan_pages": orphans,
-            "broken_links": broken_links,
-            "missing_frontmatter": missing_frontmatter,
-            "non_reciprocal_links": non_reciprocal,
-            "non_preferred_tags": non_preferred_tags,
-        }
+        """Run a health check on the wiki vault using the index."""
+        await self.vault_index.sync()
+        return await self.vault_index.lint()
 
     @logger.timer()
     async def get_wikilink_neighbors(
         self, page_slugs: list[str]
     ) -> dict[str, list[tuple[str, float]]]:
-        """Return weighted wikilink neighbours of a set of pages.
+        """Return weighted wikilink neighbours of a set of pages."""
+        await self.vault_index.sync()
+        neighbors = {}
+        slugs_lower = [s.lower() for s in page_slugs]
+        if not slugs_lower:
+            return {}
+        placeholders = ", ".join("?" for _ in slugs_lower)
 
-        Links found in a '## Connections' section carry weight 1.0
-        (deliberate associative pointer).  Links in body prose carry
-        weight 0.5 (contextual reference — may be a mere mention).
+        rows = await self.vault_index._query_dicts(
+            f"SELECT name, wikilinks FROM pages WHERE LOWER(name) IN ({placeholders})",
+            slugs_lower,
+        )
 
-        Returns:
-            Dict mapping slug → list of (linked_slug, weight) tuples.
-        """
-        link_re = re.compile(r"\[\[([^\]|#]+)")
-        # Heading detector — capture the heading text
-        heading_re = re.compile(r"^#{1,3}\s+(.+)", re.MULTILINE)
-        neighbours: dict[str, list[tuple[str, float]]] = {}
+        row_map = {r["name"].lower(): r["wikilinks"] for r in rows}
 
         for slug in page_slugs:
-            found: Path | None = None
-            for subdir in ("entities", "concepts", "sources"):
-                candidate = self.wiki_dir / subdir / f"{slug}.md"
-                if candidate.exists():
-                    found = candidate
-                    break
+            slug_lower = slug.lower()
+            if slug_lower in row_map:
+                try:
+                    links = json.loads(row_map[slug_lower])
+                    neighbors[slug] = [
+                        (target, float(weight)) for target, weight in links
+                    ]
+                except Exception:
+                    neighbors[slug] = []
+            else:
+                neighbors[slug] = []
 
-            if not found:
-                neighbours[slug] = []
-                continue
-
-            async with aiofiles.open(found, encoding="utf-8") as f:
-                content = await f.read()
-
-            _, body = parse_frontmatter(content)
-
-            # Split body into sections; tag each span with its heading
-            section_weights: list[tuple[int, int, float]] = []  # (start, end, weight)
-            headings = list(heading_re.finditer(body))
-            for i, m in enumerate(headings):
-                end = headings[i + 1].start() if i + 1 < len(headings) else len(body)
-                heading_text = m.group(1).strip().lower()
-                weight = 1.0 if "connection" in heading_text else 0.5
-                section_weights.append((m.start(), end, weight))
-
-            def _weight_for_pos(
-                pos: int, weights: list[tuple[int, int, float]]
-            ) -> float:
-                for start, end, w in weights:
-                    if start <= pos < end:
-                        return w
-                return 0.5  # pre-first-heading prose
-
-            seen: dict[str, float] = {}
-            for match in link_re.finditer(body):
-                target = match.group(1).strip().lower().replace(" ", "-")
-                if not target or target == slug:
-                    continue
-                w = _weight_for_pos(match.start(), section_weights)
-                # Keep highest weight if seen more than once
-                seen[target] = max(seen.get(target, 0.0), w)
-
-            neighbours[slug] = list(seen.items())
-
-        return neighbours
+        return neighbors
 
     @logger.timer()
     async def compute_wikilink_hits(self) -> dict[str, dict[str, float]]:
-        """Compute HITS hub and authority scores on the wiki wikilink graph.
-
-        Authorities = pages cited by many others (load-bearing knowledge nodes).
-        Hubs = pages that link to many good authorities (navigation layers).
-
-        Returns:
-            Dict mapping slug → {'hub': float, 'authority': float}
-        """
-        link_re = re.compile(r"\[\[([^\]|#]+)")
-        pages = await self.list_pages("wiki")
+        """Compute HITS hub and authority scores on the wiki wikilink graph."""
+        await self.vault_index.sync()
+        rows = await self.vault_index._query_dicts(
+            "SELECT name, wikilinks FROM pages WHERE is_operational = FALSE"
+        )
         graph: nx.DiGraph = nx.DiGraph()
-
-        for pg in pages:
-            if pg["name"] in ("index", "log"):
-                continue
-            data = await self.read_page(pg["path"])
-            body = data.get("body", "")
-            slug = pg["name"]
+        for row in rows:
+            slug = row["name"]
             graph.add_node(slug)
-            for match in link_re.finditer(body):
-                target = match.group(1).strip().lower().replace(" ", "-")
-                if target and target != slug:
-                    graph.add_edge(slug, target)
+            try:
+                links = json.loads(row["wikilinks"])
+                for target_slug, _ in links:
+                    target_slug_norm = target_slug.lower().replace(" ", "-")
+                    if target_slug_norm and target_slug_norm != slug.lower().replace(
+                        " ", "-"
+                    ):
+                        graph.add_edge(slug, target_slug)
+            except Exception:
+                continue
 
         if graph.number_of_nodes() < 2:
             return {}
@@ -591,7 +393,6 @@ class WikiAdapter:
         try:
             hubs, authorities = nx.hits(graph, max_iter=100, normalized=True)
         except nx.PowerIterationFailedConvergence:
-            # Fall back to in/out degree normalised
             n = graph.number_of_nodes()
             authorities = {v: graph.in_degree(v) / max(n - 1, 1) for v in graph.nodes()}
             hubs = {v: graph.out_degree(v) / max(n - 1, 1) for v in graph.nodes()}
@@ -621,33 +422,30 @@ class WikiAdapter:
 
     @logger.timer()
     async def cluster_wiki_pages(self, n_clusters: int | None = None) -> dict[str, Any]:
-        """Cluster wiki pages by semantic similarity using GAAC (TF-IDF).
+        """Cluster wiki pages by semantic similarity using GAAC (TF-IDF)."""
+        await self.vault_index.sync()
+        rows = await self.vault_index._query_dicts(
+            "SELECT name, body, wikilinks FROM pages WHERE is_operational = FALSE"
+        )
 
-        Uses Group-Average Agglomerative Clustering — preferred over k-means
-        because it doesn't require pre-specifying K and avoids chaining/outlier
-        problems. Auto-selects K as sqrt(n_pages) rounded, or uses n_clusters
-        if provided.
-
-        Returns:
-            {
-              'clusters': [{id, pages, missing_links}],
-              'merge_candidates': [(slug_a, slug_b, similarity)],
-            }
-        """
-        pages = await self.list_pages("wiki")
-        pages = [p for p in pages if p["name"] not in ("index", "log")]
-        if len(pages) < 3:
-            return {"clusters": [], "merge_candidates": []}
-
-        # Build corpus from page bodies
         slugs: list[str] = []
         texts: list[str] = []
-        for pg in pages:
-            data = await self.read_page(pg["path"])
-            body = data.get("body", "")
-            if body.strip():
-                slugs.append(pg["name"])
+        adjacency: dict[str, set[str]] = {}
+
+        for row in rows:
+            name = row["name"]
+            body = row["body"]
+            if body and body.strip():
+                slugs.append(name)
                 texts.append(body)
+
+                try:
+                    links = json.loads(row["wikilinks"])
+                    adjacency[name] = {
+                        target.lower().replace(" ", "-") for target, _ in links
+                    }
+                except Exception:
+                    adjacency[name] = set()
 
         if len(texts) < 3:
             return {"clusters": [], "merge_candidates": []}
@@ -657,11 +455,9 @@ class WikiAdapter:
         sparse_matrix = vectorizer.fit_transform(texts)
         matrix = csr_matrix(sparse_matrix).toarray()
         sim_matrix = cosine_similarity(matrix)
-        # Distance matrix for clustering
         dist_matrix = 1.0 - sim_matrix
         dist_matrix.clip(min=0.0, out=dist_matrix)  # numerical safety
 
-        # Auto K
         k = n_clusters or max(2, round(len(slugs) ** 0.5))
         k = min(k, len(slugs) - 1)
 
@@ -670,33 +466,18 @@ class WikiAdapter:
         )
         labels = clustering.fit_predict(dist_matrix)
 
-        # Build current wikilink adjacency for missing-link detection
-        link_re = re.compile(r"\[\[([^\]|#]+)")
-        adjacency: dict[str, set[str]] = {s: set() for s in slugs}
-        for pg in pages:
-            if pg["name"] not in adjacency:
-                continue
-            data = await self.read_page(pg["path"])
-            body = data.get("body", "")
-            for m in link_re.finditer(body):
-                t = m.group(1).strip().lower().replace(" ", "-")
-                if t and t != pg["name"]:
-                    adjacency[pg["name"]].add(t)
-
-        # Group pages by cluster
         cluster_map: dict[int, list[str]] = {}
         for slug, label in zip(slugs, labels):
             cluster_map.setdefault(int(label), []).append(slug)
 
         clusters = []
         for cid, members in sorted(cluster_map.items()):
-            # Find pairs in this cluster with no link in either direction
             missing = []
             for i, a in enumerate(members):
                 for b in members[i + 1 :]:
-                    if b not in adjacency.get(a, set()) and a not in adjacency.get(
-                        b, set()
-                    ):
+                    if b.lower().replace(" ", "-") not in adjacency.get(
+                        a, set()
+                    ) and a.lower().replace(" ", "-") not in adjacency.get(b, set()):
                         missing.append((a, b))
             clusters.append(
                 {
@@ -707,7 +488,6 @@ class WikiAdapter:
                 }
             )
 
-        # Find high-similarity pairs as merge candidates (sim > 0.7)
         merge_candidates = []
         for i, slug_a in enumerate(slugs):
             for j in range(i + 1, len(slugs)):
@@ -827,18 +607,13 @@ class WikiAdapter:
     @logger.timer()
     async def get_sync_manifest(self) -> list[dict[str, Any]]:
         """Return a list of wiki pages with hashes for delta-sync with Neo4j."""
-        pages = await self.list_pages("wiki")
-        manifest: list[dict[str, Any]] = []
-        for pg in pages:
-            data = await self.read_page(pg["path"])
-            body = data.get("body", "")
-            content_hash = hashlib.sha256(body.encode()).hexdigest()[:12]
-            manifest.append(
-                {
-                    "path": pg["path"],
-                    "name": pg["name"],
-                    "hash": content_hash,
-                    "metadata": data.get("metadata", {}),
-                }
-            )
-        return manifest
+        await self.vault_index.sync()
+        rows = await self.vault_index._query_dicts(
+            "SELECT path, name, content_hash AS hash, frontmatter FROM pages WHERE subdir = 'wiki'"
+        )
+        for row in rows:
+            try:
+                row["metadata"] = json.loads(row.pop("frontmatter", "{}"))
+            except Exception:
+                row["metadata"] = {}
+        return rows

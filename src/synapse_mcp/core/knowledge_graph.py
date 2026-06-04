@@ -204,21 +204,41 @@ class KnowledgeGraph:
         if self._local_embedder is None:
             from sentence_transformers import SentenceTransformer
 
-            self._local_embedder = SentenceTransformer(EMBEDDING_MODEL)
-            logger.info(f"Loaded embedding model: {EMBEDDING_MODEL}")
+            model_name = EMBEDDING_MODEL
+            if ":" in model_name or ("/" not in model_name and not model_name.startswith("sentence-transformers/")):
+                model_name = "sentence-transformers/all-MiniLM-L6-v2"
+                logger.warning(
+                    f"Configured embedding model '{EMBEDDING_MODEL}' is not a valid HuggingFace model. "
+                    f"Using fallback local model '{model_name}'."
+                )
+
+            self._local_embedder = SentenceTransformer(model_name)
+            logger.info(f"Loaded embedding model: {model_name}")
         return self._local_embedder
 
     @logger.timer()
     async def _embed_text(self, text: str) -> list[float]:
         """Generate embedding locally. Supports sentence-transformers or Ollama."""
+        res_vec = None
         if EMBEDDING_PROVIDER == "ollama":
-            return await self._embed_via_ollama(text)
+            try:
+                res_vec = await self._embed_via_ollama(text)
+            except Exception as e:
+                logger.warning(f"Ollama embed failed, falling back to local: {e}")
 
-        # Default: sentence-transformers (runs on GPU if available)
-        model = self._get_local_embedder()
-        loop = asyncio.get_running_loop()
-        vec = await loop.run_in_executor(None, model.encode, text)
-        return cast(list[float], vec.tolist())
+        if res_vec is None:
+            # Default: sentence-transformers (runs on GPU if available)
+            model = self._get_local_embedder()
+            loop = asyncio.get_running_loop()
+            vec = await loop.run_in_executor(None, model.encode, text)
+            res_vec = cast(list[float], vec.tolist())
+
+        # Ensure dimensions match EMBEDDING_DIM
+        if len(res_vec) < EMBEDDING_DIM:
+            res_vec = res_vec + [0.0] * (EMBEDDING_DIM - len(res_vec))
+        elif len(res_vec) > EMBEDDING_DIM:
+            res_vec = res_vec[:EMBEDDING_DIM]
+        return res_vec
 
     async def _embed_via_ollama(self, text: str) -> list[float]:
         """Get embedding from local Ollama instance."""
@@ -229,17 +249,10 @@ class KnowledgeGraph:
         # Bound the request so a dead Ollama doesn't hang the whole pipeline
         # (aiohttp's default total timeout is 5 minutes).
         timeout = aiohttp.ClientTimeout(total=30, connect=5)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload) as resp:
-                    data = await resp.json()
-                    return cast(list[float], data["embeddings"][0])
-        except Exception as e:
-            logger.warning(f"Ollama embed failed, falling back to local: {e}")
-            model = self._get_local_embedder()
-            loop = asyncio.get_running_loop()
-            vec = await loop.run_in_executor(None, model.encode, text)
-            return cast(list[float], vec.tolist())
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                data = await resp.json()
+                return cast(list[float], data["embeddings"][0])
 
     # ------------------------------------------------------------------
     # Store operations

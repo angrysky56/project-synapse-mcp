@@ -9,12 +9,13 @@ through the Model Context Protocol (MCP).
 
 import asyncio
 import atexit
+
+# trunk-ignore(bandit/B404)
+import json
 import os
 import re
 import shutil
 import signal
-
-# trunk-ignore(bandit/B404)
 import subprocess
 import sys
 import traceback
@@ -35,6 +36,7 @@ from .data_pipeline.semantic_integrator import SemanticIntegrator
 from .data_pipeline.text_processor import TextProcessor
 from .semantic.montague_parser import MontagueParser
 from .utils.logging_config import quiet_chatty_loggers, setup_logging
+from .utils.response_budget import budget_response
 from .wiki.wiki_adapter import WikiAdapter
 from .zettelkasten.insight_engine import InsightEngine
 
@@ -771,48 +773,119 @@ async def analyze_semantic_structure(
 
 
 @mcp.tool()
-async def wiki_list_pages(ctx: Context, subdir: str = "wiki") -> str:
+async def wiki_list_pages(
+    ctx: Context,
+    subdir: str = "wiki",
+    limit: int = 50,
+    offset: int = 0,
+    tag: str | None = None,
+) -> str:
     """
-    List all markdown pages in the wiki vault.
+    List all markdown pages in the wiki vault with pagination.
 
     Args:
         subdir: Subdirectory to list ('wiki' or 'raw').
+        limit: Maximum pages to return (default 50, max 200).
+        offset: Offset for pagination.
+        tag: Filter by tag.
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
         synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured. Set WIKI_VAULT_PATH."
-        pages = await synapse.wiki_adapter.list_pages(subdir)
+
+        limit = min(max(1, limit), 200)
+        res = await synapse.wiki_adapter.vault_index.list_pages(
+            subdir=subdir, limit=limit, offset=offset, tag=tag
+        )
+        pages = res["pages"]
+        total = res["total"]
+        has_more = res["has_more"]
+
         if not pages:
-            return f"No pages found in {subdir}/"
-        lines = [f"📂 **{subdir}/** — {len(pages)} pages\n"]
-        for pg in pages:
-            lines.append(f"- `{pg['path']}` — {pg.get('summary', pg['name'])}")
-        return "\n".join(lines)
+            return f"No pages found in {subdir}/ matching criteria."
+
+        header = f"📂 **{subdir}/** — showing {len(pages)} of {total} pages"
+        items = [f"- `{pg['path']}` — {pg.get('summary', pg['name'])}" for pg in pages]
+
+        footer = ""
+        if has_more:
+            footer = f"\n_…{total - offset - len(pages)} more. Use offset={offset + limit} to continue._"
+
+        return budget_response(header=header, items=items, footer=footer)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("wiki_list_pages failed: %s", e)
         return f"Error: {e}"
 
 
 @mcp.tool()
-async def wiki_read_page(ctx: Context, path: str) -> str:
+async def wiki_read_page(
+    ctx: Context,
+    path: str,
+    mode: str = "excerpt",  # "meta" | "excerpt" | "full"
+) -> str:
     """
-    Read a wiki page by relative path (e.g. 'wiki/concepts/rag.md').
+    Read a wiki page.
 
     Args:
-        path: Relative path from vault root.
+        path: Relative path from vault root (e.g. 'wiki/concepts/rag.md').
+        mode: What to return:
+            - "meta": metadata/frontmatter only (from index, 0 file reads)
+            - "excerpt": metadata + first 500 characters of page body (from index)
+            - "full": complete page content (reads file from disk)
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
         synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
-        data = await synapse.wiki_adapter.read_page(path)
-        meta: dict[str, Any] = data.get("metadata", {})
-        body: str = data.get("body", "")
-        header = "\n".join(f"  {k}: {v}" for k, v in meta.items())
-        return f"**Metadata:**\n{header}\n\n**Content:**\n{body}"
+
+        if mode == "meta":
+            meta = await synapse.wiki_adapter.vault_index.get_page_meta(path)
+            if not meta:
+                return f"❌ Page not found: {path}"
+            header = "\n".join(
+                f"  {k}: {v}"
+                for k, v in meta.items()
+                if k not in ("body", "frontmatter") and v is not None
+            )
+            return f"**Metadata (Mode: meta):**\n{header}"
+
+        elif mode == "excerpt":
+            # Query pages table directly to get body and metadata
+            rows = await synapse.wiki_adapter.vault_index._query_dicts(
+                "SELECT name, summary, tags, created, updated, word_count, is_operational, frontmatter, body FROM pages WHERE path = ?",
+                [path],
+            )
+            if not rows:
+                return f"❌ Page not found: {path}"
+            pg = rows[0]
+            try:
+                fm = json.loads(pg.pop("frontmatter", "{}"))
+                if isinstance(fm, dict):
+                    pg.update(fm)
+            except Exception:
+                pass
+            body = pg.pop("body", "")
+            excerpt = body[:500]
+            if len(body) > 500:
+                excerpt += "\n\n_... (body truncated. Use mode='full' to read the entire page) ..._"
+
+            header = "\n".join(
+                f"  {k}: {v}"
+                for k, v in pg.items()
+                if k not in ("body", "tags") and v is not None
+            )
+            return f"**Metadata (Mode: excerpt):**\n{header}\n\n**Content Excerpt:**\n{excerpt}"
+
+        else:  # mode == "full"
+            data = await synapse.wiki_adapter.read_page(path)
+            meta: dict[str, Any] = data.get("metadata", {})
+            body: str = data.get("body", "")
+            header = "\n".join(f"  {k}: {v}" for k, v in meta.items())
+            return f"**Metadata:**\n{header}\n\n**Content:**\n{body}"
+
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("wiki_read_page failed: %s", e)
         return f"❌ Error: {e}"
@@ -854,27 +927,65 @@ async def wiki_write_page(
 
 
 @mcp.tool()
-async def wiki_search(ctx: Context, query: str) -> str:
+async def wiki_search(
+    ctx: Context,
+    query: str,
+    limit: int = 10,
+    subdir: str = "wiki",
+) -> str:
     """Search wiki pages by keyword.
 
     Args:
         query: Space-separated search terms.
+        limit: Maximum results to return (default 10).
+        subdir: Scope to subdirectory.
     """
     try:
         synapse = ctx.request_context.lifespan_context["synapse"]
         synapse.set_context(ctx)
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
-        results = await synapse.wiki_adapter.search_pages(query)
+
+        limit = min(max(1, limit), 50)
+        results = await synapse.wiki_adapter.search_pages(
+            query, subdir=subdir, limit=limit
+        )
         if not results:
             return f"No pages matched: {query}"
-        lines = [f"🔍 {len(results)} results for '{query}'\n"]
+
+        header = f"🔍 {len(results)} results for '{query}'"
+        items = []
         for r in results:
-            lines.append(f"- `{r['path']}`")
-        return "\n".join(lines)
+            items.append(
+                f"- `{r['path']}` — {r.get('summary', '') or r['name']}\n  {r.get('excerpt', '')}"
+            )
+
+        return budget_response(header=header, items=items)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Wiki search failed: %s", e, exc_info=True)
         return f"❌ Wiki search failed [{type(e).__name__}]: {str(e)}"
+
+
+@mcp.tool()
+async def wiki_sync_index(ctx: Context) -> str:
+    """Refresh the wiki index database from disk.
+
+    Runs automatically on server start and after write operations.
+    Call manually if files were changed outside Synapse (e.g., Obsidian edits, git pull).
+    """
+    try:
+        synapse = ctx.request_context.lifespan_context["synapse"]
+        synapse.set_context(ctx)
+        if not synapse.wiki_adapter:
+            return "Wiki adapter not configured."
+        result = await synapse.wiki_adapter.vault_index.sync()
+        return (
+            f"Index synced: {result.added} added, {result.updated} updated, "
+            f"{result.deleted} deleted. {result.total} pages indexed."
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("wiki_sync_index failed: %s", e)
+        return f"❌ Error: {e}"
 
 
 @mcp.tool()
@@ -889,52 +1000,125 @@ async def wiki_lint(ctx: Context) -> str:
         if not synapse.wiki_adapter:
             return "Wiki adapter not configured."
         report = await synapse.wiki_adapter.lint()
-        lines = [f"🩺 **Wiki Health Check** — {report['total_pages']} pages\n"]
-        if report["orphan_pages"]:
-            lines.append(f"**Orphans** ({len(report['orphan_pages'])}):")
-            for o in report["orphan_pages"]:
-                lines.append(f"  - {o}")
-        if report["broken_links"]:
-            lines.append(f"**Broken links** ({len(report['broken_links'])}):")
-            for bl in report["broken_links"]:
-                lines.append(f"  - {bl['source']} → [[{bl['target']}]]")
-        if report["missing_frontmatter"]:
-            lines.append(
-                f"**Missing frontmatter** ({len(report['missing_frontmatter'])}):"
+
+        orphans = report["orphan_pages"]
+        broken = report["broken_links"]
+        missing_fm = report["missing_frontmatter"]
+        invalid_fm = report.get("invalid_frontmatter", [])
+        non_recip = report.get("non_reciprocal_links", [])
+        non_pref = report.get("non_preferred_tags", [])
+
+        # --- Build the FULL report (every item) for the on-disk audit file ---
+        full: list[str] = [
+            f"# Wiki Health Check — {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC",
+            "",
+            f"- Total pages: {report['total_pages']} "
+            f"({report.get('knowledge_pages', '?')} knowledge, "
+            f"{report.get('operational_excluded', 0)} operational excluded)",
+            f"- Orphans: {len(orphans)} · Broken links: {len(broken)} · "
+            f"Missing frontmatter: {len(missing_fm)} · "
+            f"Invalid frontmatter: {len(invalid_fm)} · "
+            f"Non-reciprocal: {len(non_recip)} · Non-preferred tags: {len(non_pref)}",
+            "",
+        ]
+        if invalid_fm:
+            full.append(f"## Invalid frontmatter ({len(invalid_fm)})\n")
+            full += [f"- {iv['page']} — {iv['error']}" for iv in invalid_fm] + [""]
+        if orphans:
+            full.append(f"## Orphans ({len(orphans)})\n")
+            full += [f"- {o}" for o in orphans] + [""]
+        if broken:
+            full.append(f"## Broken links ({len(broken)})\n")
+            full += [f"- {bl['source']} → [[{bl['target']}]]" for bl in broken] + [""]
+        if missing_fm:
+            full.append(f"## Missing frontmatter ({len(missing_fm)})\n")
+            full += [f"- {mf}" for mf in missing_fm] + [""]
+        if non_recip:
+            full.append(f"## Non-reciprocal links ({len(non_recip)})\n")
+            full += [
+                f"- [[{nr['source']}]] → [[{nr['missing_back_link']}]]"
+                for nr in non_recip
+            ] + [""]
+        if non_pref:
+            full.append(f"## Non-preferred tags ({len(non_pref)})\n")
+            full += [
+                f"- {np_['page']}: `{np_['tag']}` → `{np_['use_instead']}`"
+                for np_ in non_pref
+            ] + [""]
+
+        # Persist the full report to wiki/audits/ (regenerable; not in log.md).
+        report_rel = f"audits/lint-{datetime.now(timezone.utc):%Y-%m-%d}.md"
+        try:
+            audit_path = synapse.wiki_adapter.wiki_dir / report_rel
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            audit_path.write_text("\n".join(full), encoding="utf-8")
+        except Exception as we:  # pragma: no cover
+            logger.warning("Could not persist lint report: %s", we)
+
+        # --- Pattern detection: group broken links by TARGET. One target hit by
+        # many sources is a systemic pattern (e.g. a template stamping a bad
+        # link into every page), far more actionable than N individual lines. ---
+        from collections import Counter
+
+        broken_by_target = Counter(bl["target"] for bl in broken)
+        top_patterns = broken_by_target.most_common(8)
+
+        # --- Build the COMPACT digest returned to the agent ---
+        digest: list[str] = [
+            f"🩺 **Wiki Health Check** — {report['total_pages']} pages "
+            f"({report.get('knowledge_pages', '?')} knowledge, "
+            f"{report.get('operational_excluded', 0)} operational excluded)",
+            "",
+            f"- **Orphans**: {len(orphans)}",
+            f"- **Broken links**: {len(broken)}",
+            f"- **Missing frontmatter**: {len(missing_fm)}",
+            f"- **Invalid frontmatter (breaks Obsidian)**: {len(invalid_fm)}",
+            f"- **Non-reciprocal**: {len(non_recip)}",
+            f"- **Non-preferred tags**: {len(non_pref)}",
+            "",
+            f"📄 Full itemized report: `wiki/{report_rel}`",
+            "",
+        ]
+        if invalid_fm:
+            digest.append(
+                "**⚠ Invalid frontmatter — fix these first (they break Obsidian "
+                "properties & any wikilinks in frontmatter).** Use the "
+                "`obsidian-markdown` skill: quote any value containing a colon, "
+                "em-dash, or `[[wikilink]]`; write multi-value fields (e.g. "
+                "`sources`) as a block list of quoted items, never an inline "
+                "`[a, b]` array:"
             )
-            for mf in report["missing_frontmatter"]:
-                lines.append(f"  - {mf}")
-        if report.get("non_reciprocal_links"):
-            lines.append(
-                f"**Non-reciprocal links** ({len(report['non_reciprocal_links'])}) "
-                f"— A links to B but B doesn't link back:"
+            for iv in invalid_fm[:12]:
+                digest.append(f"  - {iv['page']} — {iv['error']}")
+            if len(invalid_fm) > 12:
+                digest.append(f"  - …and {len(invalid_fm) - 12} more (see report)")
+            digest.append("")
+        if top_patterns:
+            digest.append(
+                "**Top broken-link targets** (likely systemic — fix the source pattern):"
             )
-            for nr in report["non_reciprocal_links"]:
-                lines.append(
-                    f"  - [[{nr['source']}]] → [[{nr['missing_back_link']}]] "
-                    "(no return link)"
-                )
-        if report.get("non_preferred_tags"):
-            lines.append(
-                f"**Non-preferred tags** ({len(report['non_preferred_tags'])}) "
-                f"— use controlled vocabulary:"
+            for tgt, n in top_patterns:
+                digest.append(f"  - {n}× → [[{tgt}]]")
+            digest.append("")
+        # A small, actionable sample of orphans (not all 65).
+        if orphans:
+            sample = orphans[:10]
+            digest.append(
+                f"**Sample orphans** (first {len(sample)} of {len(orphans)}):"
             )
-            for np_ in report["non_preferred_tags"]:
-                lines.append(
-                    f"  - {np_['page']}: `{np_['tag']}` → use `{np_['use_instead']}`"
-                )
-        if not any(
-            [
-                report["orphan_pages"],
-                report["broken_links"],
-                report["missing_frontmatter"],
-                report.get("non_reciprocal_links"),
-                report.get("non_preferred_tags"),
-            ]
-        ):
-            lines.append("✅ All clear — no issues found.")
-        await synapse.wiki_adapter.append_log("lint", "\n".join(lines))
-        return "\n".join(lines)
+            digest += [f"  - {o}" for o in sample]
+            digest.append("")
+        if not any([orphans, broken, missing_fm, non_recip, non_pref]):
+            digest.append("✅ All clear — no issues found.")
+
+        # Log a one-line summary (full report lives in wiki/audits/, not log.md).
+        await synapse.wiki_adapter.append_log(
+            "lint",
+            f"{report['total_pages']} pages · {len(orphans)} orphans · "
+            f"{len(broken)} broken · {len(missing_fm)} missing-fm · "
+            f"report: {report_rel}",
+        )
+        return "\n".join(digest)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Wiki lint failed: %s", e, exc_info=True)
         return f"❌ Wiki lint failed [{type(e).__name__}]: {str(e)}"

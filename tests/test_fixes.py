@@ -6,6 +6,10 @@ Test script to verify the insight engine fixes and add sample data.
 import asyncio
 import os
 import sys
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Add the src directory to the Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
