@@ -360,8 +360,9 @@ class VaultIndex:
         # 6. Rebuild link_graph table
         if to_add_update or to_delete:
             await self._execute("DELETE FROM link_graph")
+            # Include all pages except log/index templates so operational links count towards non-orphan status
             rows = await self._query_dicts(
-                "SELECT name, wikilinks FROM pages WHERE is_operational = FALSE"
+                "SELECT name, wikilinks FROM pages WHERE name NOT IN ('index', 'log', 'TEMPLATE')"
             )
 
             insert_params = []
@@ -703,13 +704,13 @@ class VaultIndex:
 
         # 3. Missing frontmatter
         missing_fm_rows = await self._query_dicts(
-            "SELECT path FROM pages WHERE frontmatter = '{}' OR frontmatter IS NULL"
+            "SELECT path FROM pages WHERE is_operational = FALSE AND (frontmatter = '{}' OR frontmatter IS NULL)"
         )
         missing_frontmatter = [r["path"] for r in missing_fm_rows]
 
         # 4. Invalid frontmatter
         invalid_fm_rows = await self._query_dicts(
-            "SELECT path, yaml_error FROM pages WHERE yaml_error IS NOT NULL"
+            "SELECT path, yaml_error FROM pages WHERE is_operational = FALSE AND yaml_error IS NOT NULL"
         )
         invalid_frontmatter = [
             {"page": r["path"], "error": r["yaml_error"]} for r in invalid_fm_rows
@@ -744,7 +745,7 @@ class VaultIndex:
         non_preferred_tags = []
         use_map = await self._load_tag_taxonomy()
         if use_map:
-            tag_rows = await self._query_dicts("SELECT path, tags FROM pages")
+            tag_rows = await self._query_dicts("SELECT path, tags FROM pages WHERE is_operational = FALSE")
             for row in tag_rows:
                 try:
                     tags = json.loads(row["tags"])
