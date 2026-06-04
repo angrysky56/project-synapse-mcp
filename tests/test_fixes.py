@@ -6,6 +6,7 @@ Test script to verify the insight engine fixes and add sample data.
 import asyncio
 import os
 import sys
+
 from dotenv import load_dotenv
 
 # Load environment variables

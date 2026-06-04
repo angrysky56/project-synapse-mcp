@@ -6,7 +6,6 @@ and optionally writing a full report to a spillover file.
 """
 
 from pathlib import Path
-from typing import Optional
 
 MAX_RESPONSE_CHARS = 4000  # ~1000 tokens
 
@@ -16,7 +15,7 @@ def budget_response(
     items: list[str],
     footer: str = "",
     max_chars: int = MAX_RESPONSE_CHARS,
-    spillover_path: Optional[Path] = None,
+    spillover_path: Path | None = None,
 ) -> str:
     """Build a response that fits within a character budget.
 
@@ -27,7 +26,7 @@ def budget_response(
     total_non_items_len = len(header) + len(footer) + len("\n") * 2
     if total_non_items_len >= max_chars:
         # Non-item content itself exceeds budget; return a truncated header
-        return header[:max_chars - 10] + "\n...(truncated)"
+        return header[: max_chars - 10] + "\n...(truncated)"
 
     # If spillover is provided, write the full content to disk
     if spillover_path:
@@ -59,7 +58,7 @@ def budget_response(
         spillover_msg = ""
         if spillover_path:
             spillover_msg = f" Full report saved to: `{spillover_path.name}`"
-        
+
         remaining = len(items) - items_added
         result.append(f"\n_... {remaining} more items truncated.{spillover_msg}_")
 
