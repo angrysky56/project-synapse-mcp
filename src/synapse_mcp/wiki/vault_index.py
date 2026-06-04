@@ -60,7 +60,9 @@ class VaultIndex:
                         self._conn = duckdb.connect(":memory:")
                         self._is_fallback = True
                     except Exception as fallback_err:
-                        logger.error(f"Failed to open database in-memory: {fallback_err}")
+                        logger.error(
+                            f"Failed to open database in-memory: {fallback_err}"
+                        )
                         raise fallback_err
                 else:
                     raise
@@ -92,8 +94,8 @@ class VaultIndex:
                 PRIMARY KEY (source_slug, target_slug)
             );
 
-            CREATE INDEX IF NOT EXISTS idx_pages_name ON pages(name);
-            CREATE INDEX IF NOT EXISTS idx_pages_subdir ON pages(subdir);
+            DROP INDEX IF EXISTS idx_pages_name;
+            DROP INDEX IF EXISTS idx_pages_subdir;
             """)
         return self._conn
 
@@ -745,7 +747,9 @@ class VaultIndex:
         non_preferred_tags = []
         use_map = await self._load_tag_taxonomy()
         if use_map:
-            tag_rows = await self._query_dicts("SELECT path, tags FROM pages WHERE is_operational = FALSE")
+            tag_rows = await self._query_dicts(
+                "SELECT path, tags FROM pages WHERE is_operational = FALSE"
+            )
             for row in tag_rows:
                 try:
                     tags = json.loads(row["tags"])
