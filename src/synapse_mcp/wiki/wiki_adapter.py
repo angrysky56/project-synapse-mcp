@@ -148,13 +148,28 @@ class WikiAdapter:
 
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             meta = metadata or {}
-            meta.setdefault("updated", now)
-            if not full.exists():
+
+            if full.exists():
+                try:
+                    async with aiofiles.open(full, encoding="utf-8") as f:
+                        old_content = await f.read()
+                    old_meta, _ = parse_frontmatter(old_content)
+                    merged_meta = dict(old_meta)
+                    merged_meta.update(meta)
+                    meta = merged_meta
+                except Exception as e:
+                    logger.warning("Could not read existing metadata for %s: %s", rel_path, e)
+
+            meta["updated"] = now
+            if not full.exists() or "created" not in meta:
                 meta.setdefault("created", now)
 
             content = build_frontmatter(meta) + "\n\n" + body.strip() + "\n"
-            async with aiofiles.open(full, "w", encoding="utf-8") as f:
+
+            tmp_full = full.with_suffix(full.suffix + ".tmp")
+            async with aiofiles.open(tmp_full, "w", encoding="utf-8") as f:
                 await f.write(content)
+            os.replace(tmp_full, full)
             logger.info("Wrote wiki page: %s", rel_path)
             await self.vault_index.upsert_page(rel_path)
             return f"Wrote {rel_path}"
