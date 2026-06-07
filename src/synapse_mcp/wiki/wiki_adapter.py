@@ -158,7 +158,9 @@ class WikiAdapter:
                     merged_meta.update(meta)
                     meta = merged_meta
                 except Exception as e:
-                    logger.warning("Could not read existing metadata for %s: %s", rel_path, e)
+                    logger.warning(
+                        "Could not read existing metadata for %s: %s", rel_path, e
+                    )
 
             meta["updated"] = now
             if not full.exists() or "created" not in meta:
@@ -233,6 +235,14 @@ class WikiAdapter:
                     "gbrain-facts block is missing ``source:`` field — "
                     "add ``source: <url or page>`` for citation traceability."
                 )
+
+        # --- 4. Duplicate frontmatter detection ---
+        if _re.match(r"^\s*---\n[\s\S]*?\n---\n", body):
+            raise WikiError(
+                "Body contains a frontmatter block (starts with `---`). "
+                "This will result in duplicate frontmatter because write_page "
+                "automatically injects frontmatter."
+            )
 
         return warnings
 
