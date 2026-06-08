@@ -197,7 +197,10 @@ class InsightEngine:
     async def initialize(self) -> None:
         """Initialize the insight engine."""
         try:
-            await self._build_analysis_graph()
+            # We explicitly do NOT build the analysis graph here. Building the
+            # graph is O(V*E) and can saturate the event loop for 30+ seconds on
+            # large knowledge graphs, causing the MCP client handshake to time out.
+            # The graph is built lazily by _autonomous_processing_cycle and generate_insights.
             logger.info("Insight engine initialized successfully")
         except Exception as e:
             logger.error("Failed to initialize insight engine: %s", e)
@@ -700,9 +703,7 @@ class InsightEngine:
         # general LLM_TIMEOUT lets you raise/lower all LLM calls at once
         # without juggling per-provider knobs.
         timeout = int(
-            os.getenv("INSIGHT_LLM_TIMEOUT")
-            or os.getenv("LLM_TIMEOUT")
-            or "60"
+            os.getenv("INSIGHT_LLM_TIMEOUT") or os.getenv("LLM_TIMEOUT") or "60"
         )
 
         try:
@@ -1183,8 +1184,9 @@ class InsightEngine:
                         insight.get("zettel_id", "?"),
                         e,
                     )
-            logger.info("Persisted %d/%d insights to knowledge graph",
-                        persisted, len(insights))
+            logger.info(
+                "Persisted %d/%d insights to knowledge graph", persisted, len(insights)
+            )
 
         # File output — picked up by cron / external readers so they don't
         # have to keep an MCP session alive for the full run.
@@ -1243,14 +1245,16 @@ class InsightEngine:
             f"_Generated {payload['generated_at']} · {len(insights)} insight(s)_\n",
         ]
         for i, ins in enumerate(insights, 1):
-            md_lines.extend([
-                f"## {i}. {ins.get('title', '(untitled)')}",
-                f"**Confidence**: {ins.get('confidence', 0):.2f} · "
-                f"**Pattern**: `{ins.get('pattern_type', '?')}` · "
-                f"**Zettel**: `{ins.get('zettel_id', '?')}`\n",
-                str(ins.get("content", "")).strip(),
-                "",
-            ])
+            md_lines.extend(
+                [
+                    f"## {i}. {ins.get('title', '(untitled)')}",
+                    f"**Confidence**: {ins.get('confidence', 0):.2f} · "
+                    f"**Pattern**: `{ins.get('pattern_type', '?')}` · "
+                    f"**Zettel**: `{ins.get('zettel_id', '?')}`\n",
+                    str(ins.get("content", "")).strip(),
+                    "",
+                ]
+            )
             evidence = ins.get("evidence") or []
             if evidence:
                 md_lines.append(f"_Evidence ({len(evidence)} fact(s)):_")
