@@ -40,8 +40,13 @@ from .utils.response_budget import budget_response
 from .wiki.wiki_adapter import WikiAdapter
 from .zettelkasten.insight_engine import InsightEngine
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from the project root .env, regardless of the
+# cwd we were launched from. The .env is the single source of truth for
+# config — keep MCP client configs free of env blocks (especially secrets),
+# since any process env set there would override .env values.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_PROJECT_ROOT / ".env")
+load_dotenv()  # fallback: cwd .env, for non-standard layouts
 
 # Configure logging for MCP (stderr only)
 logger = setup_logging(__name__)

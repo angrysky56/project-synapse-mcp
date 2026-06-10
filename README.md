@@ -23,9 +23,10 @@ For detailed information on setting up and using Project Synapse, please refer t
 
 **This is a knowledge system, not a code editor.** It's for the thinking, research, and writing that surrounds projects — architecture decisions, domain research, design rationale, reference material, meeting notes.
 
-Code lives in its repo. Knowledge *about* the code lives here.
+Code lives in its repo. Knowledge _about_ the code lives here.
 
 **Use cases:**
+
 - Research deep-dives that accumulate over weeks/months
 - Project knowledge bases (why decisions were made, not just what)
 - Personal knowledge management (articles, books, podcast notes)
@@ -61,6 +62,7 @@ Web / Raw Sources
 ## Key Features
 
 ### Knowledge Graph (Neo4j 2026.x)
+
 - Native **VECTOR** type with ANN semantic search
 - Fulltext BM25 indexes for keyword search
 - Hybrid search (vector + BM25 score fusion)
@@ -70,6 +72,7 @@ Web / Raw Sources
 - Zettelkasten engine for autonomous insight generation
 
 ### LLM-WIKI Integration
+
 - Bridges Obsidian Markdown vault with the Neo4j graph
 - Full page CRUD with YAML frontmatter
 - Automatic index generation and append-only log
@@ -78,11 +81,13 @@ Web / Raw Sources
 - Based on [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
 
 ### Web Content Ingestion (defuddle)
+
 - `wiki_fetch_url` fetches any URL, strips navigation/ads/clutter via defuddle, ingests into Neo4j, and archives to `Clippings/` — one call, fully automated
 - `wiki_ingest_raw` auto-moves processed files from `raw/` to `Clippings/` — inbox stays clean
 - `raw/` is a true inbox: empty after every session
 
 ### Local-Only Embeddings (No Paid APIs)
+
 - **sentence-transformers** (default) — runs on GPU
 - **Ollama** (optional) — any local embedding model
 - All vectors stored natively in Neo4j via `db.create.setNodeVectorProperty()`
@@ -99,6 +104,7 @@ Web / Raw Sources
 - Node.js + defuddle (for web content fetching — see below)
 
 ### Neo4j Setup
+
 ```bash
 # Ubuntu/Debian — see neo4j.com for other platforms
 sudo apt install neo4j
@@ -128,6 +134,7 @@ defuddle --version
 > **Note:** Synapse finds defuddle automatically via nvm paths even if it's not on your shell's PATH. If `wiki_fetch_url` reports defuddle not found, ensure it's installed in an nvm-managed Node version.
 
 ### Obsidian Vault Setup
+
 1. Create a new vault in Obsidian (or clone your wiki repo)
 2. Install the **Git** community plugin (Settings → Community Plugins → Browse → "Git")
 3. Configure Git plugin with your GitHub credentials
@@ -149,6 +156,7 @@ cp .env.example .env  # edit with your Neo4j password and vault path
 ### Configuration
 
 Edit `.env`:
+
 ```bash
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
@@ -173,23 +181,20 @@ WIKI_GITHUB_REPO=https://github.com/user/wiki-repo
 ### Claude Desktop / MCP Integration
 
 Add to your MCP config:
+
 ```json
 {
   "mcpServers": {
     "project-synapse": {
       "command": "uv",
       "args": [
-        "--directory", "/path/to/project-synapse-mcp",
-        "run", "python", "-m", "synapse_mcp.server"
-      ],
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j",
-        "NEO4J_PASSWORD": "your_password",
-        "NEO4J_DATABASE": "neo4j",
-        "WIKI_VAULT_PATH": "/path/to/obsidian-vault",
-        "WIKI_GITHUB_REPO": "https://github.com/user/wiki-repo"
-      }
+        "--directory",
+        "/path/to/project-synapse-mcp",
+        "run",
+        "python",
+        "-m",
+        "synapse_mcp.server"
+      ]
     }
   }
 }
@@ -198,26 +203,28 @@ Add to your MCP config:
 ## MCP Tools
 
 ### Knowledge Graph
-| Tool | Description |
-|---|---|
-| `ingest_text` | Process text through semantic pipeline → Neo4j |
-| `query_knowledge` | Vector semantic search with insight-first results |
-| `explore_connections` | Graph traversal for hidden relationships |
-| `generate_insights` | Autonomous Zettelkatten pattern detection |
-| `analyze_semantic_structure` | Montague Grammar semantic analysis |
+
+| Tool                         | Description                                       |
+| ---------------------------- | ------------------------------------------------- |
+| `ingest_text`                | Process text through semantic pipeline → Neo4j    |
+| `query_knowledge`            | Vector semantic search with insight-first results |
+| `explore_connections`        | Graph traversal for hidden relationships          |
+| `generate_insights`          | Autonomous Zettelkatten pattern detection         |
+| `analyze_semantic_structure` | Montague Grammar semantic analysis                |
 
 ### Wiki (LLM-WIKI)
-| Tool | Description |
-|---|---|
-| `wiki_fetch_url` | Fetch URL → defuddle clean → ingest → archive to Clippings/ |
-| `wiki_ingest_raw` | Ingest file from raw/ → Neo4j + auto-move to Clippings/ |
-| `wiki_write_page` | Create/update wiki page with frontmatter (updates index write-through) |
-| `wiki_read_page` | Read a wiki page by path supporting `mode` (meta, excerpt, full) |
-| `wiki_search` | Keyword search across wiki pages returning excerpts and snippets |
-| `wiki_list_pages` | List pages in a subdirectory with paginated `limit`, `offset`, and `tag` filters |
-| `wiki_update_index` | Rebuild the wiki index (`index.md`) |
-| `wiki_sync_index` | Manually sync/refresh the DuckDB page index database from disk |
-| `wiki_lint` | Health check: orphans, broken links, missing/invalid frontmatter (runs via SQL) |
+
+| Tool                | Description                                                                      |
+| ------------------- | -------------------------------------------------------------------------------- |
+| `wiki_fetch_url`    | Fetch URL → defuddle clean → ingest → archive to Clippings/                      |
+| `wiki_ingest_raw`   | Ingest file from raw/ → Neo4j + auto-move to Clippings/                          |
+| `wiki_write_page`   | Create/update wiki page with frontmatter (updates index write-through)           |
+| `wiki_read_page`    | Read a wiki page by path supporting `mode` (meta, excerpt, full)                 |
+| `wiki_search`       | Keyword search across wiki pages returning excerpts and snippets                 |
+| `wiki_list_pages`   | List pages in a subdirectory with paginated `limit`, `offset`, and `tag` filters |
+| `wiki_update_index` | Rebuild the wiki index (`index.md`)                                              |
+| `wiki_sync_index`   | Manually sync/refresh the DuckDB page index database from disk                   |
+| `wiki_lint`         | Health check: orphans, broken links, missing/invalid frontmatter (runs via SQL)  |
 
 ## Wiki Vault Structure
 
@@ -275,4 +282,4 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-*Project Synapse: From reactive RAG to persistent, compounding knowledge.*
+_Project Synapse: From reactive RAG to persistent, compounding knowledge._

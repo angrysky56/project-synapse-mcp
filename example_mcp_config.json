@@ -1,4 +1,5 @@
 {
+  "_comment": "All configuration (Neo4j credentials, LLM/embedding providers, wiki paths) lives in the project's .env file — no env block needed here. The server loads <project-root>/.env on import. Any env vars set here would OVERRIDE the .env, so only add them for deliberate per-launch overrides.",
   "mcpServers": {
     "project-synapse": {
       "command": "uv",
@@ -9,19 +10,7 @@
         "python",
         "-m",
         "synapse_mcp.server"
-      ],
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "neo4j",
-        "NEO4J_PASSWORD": "synapse_password",
-        "NEO4J_DATABASE": "synapse",
-        "LOG_LEVEL": "INFO",
-        "WIKI_VAULT_PATH": "/absolute/path/to/your/LLM-WIKI",
-        "WIKI_GITHUB_REPO": "https://github.com/your-username/your-repo",
-        "EMBEDDING_PROVIDER": "ollama",
-        "EMBEDDING_DIMENSION": "2560",
-        "OLLAMA_EMBED_MODEL": "qwen3-embedding:4b"
-      }
+      ]
     }
   }
 }
