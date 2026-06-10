@@ -70,7 +70,10 @@ class WikiAdapter:
         for d in [self.raw_dir, self.wiki_dir]:
             d.mkdir(parents=True, exist_ok=True)
         await self.vault_index.initialize()
-        await self.vault_index.sync()
+        # NOTE: no vault_index.sync() here — a full scan of a large vault
+        # takes 25s+ and blocks MCP startup past the client's handshake
+        # timeout. Wiki tools sync lazily on first use, and the server warms
+        # the index in a background task right after startup.
         await self.check_health()
         logger.info("Wiki adapter initialised – vault: %s", self.vault_path)
 

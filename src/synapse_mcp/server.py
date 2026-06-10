@@ -86,18 +86,26 @@ class SynapseServer:
         logger.info("Initializing Project Synapse server components")
 
         try:
-            # Initialize knowledge graph
+            # Initialize knowledge graph. If Neo4j isn't up yet (Neo4j
+            # Desktop boots its DBMS *after* login, often later than the MCP
+            # client launches us), don't kill the whole server — start in
+            # degraded mode and keep retrying in the background.
             self.knowledge_graph = KnowledgeGraph()
-            await self.knowledge_graph.connect()
-
-            # Initialize temporal-fact store (shares the KG's Neo4j driver
-            # so we don't open a second bolt pool).
-            if self.knowledge_graph.driver is not None:
-                self.temporal_facts = TemporalFactStore(
-                    self.knowledge_graph.driver,
-                    self.knowledge_graph.database,
+            try:
+                # Only 2 quick retries (~3s) at startup — if Neo4j Desktop is
+                # still booting, the background reconnect loop (10s cycle)
+                # picks it up without blocking the MCP handshake.
+                await self.knowledge_graph.connect(retries=2)
+                await self._init_temporal_facts()
+            except Exception as kg_err:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Neo4j unavailable at startup (%s) — starting in degraded "
+                    "mode; will keep retrying in the background",
+                    kg_err,
                 )
-                await self.temporal_facts.initialize_schema()
+                reconnect_task = asyncio.create_task(self._kg_reconnect_loop())
+                self.background_tasks.add(reconnect_task)
+                reconnect_task.add_done_callback(self.background_tasks.discard)
 
             # Initialize semantic parser
             self.montague_parser = MontagueParser()
@@ -118,17 +126,65 @@ class SynapseServer:
             )
             await self.insight_engine.initialize()
 
-            # Initialize wiki adapter
+            # Initialize wiki adapter. Directory setup + index open only —
+            # the full vault scan (~25-55s for a large vault) runs as a
+            # background task so the MCP handshake isn't blocked past the
+            # client's 60s timeout. Wiki tools call sync() lazily anyway.
             self.wiki_adapter = WikiAdapter()
             await self.wiki_adapter.initialize()
+            if self.wiki_adapter.vault_path and self.wiki_adapter.vault_path.exists():
+                warm_task = asyncio.create_task(self._warm_wiki_index())
+                self.background_tasks.add(warm_task)
+                warm_task.add_done_callback(self.background_tasks.discard)
 
-            # Final health check
+            # Final health check (logs status; doesn't raise in degraded mode)
             await self.check_health()
             logger.info("All components initialized successfully")
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Failed to initialize server components: %s", e)
             raise
+
+    async def _init_temporal_facts(self) -> None:
+        """Initialize the temporal-fact store off the KG's Neo4j driver."""
+        if self.knowledge_graph and self.knowledge_graph.driver is not None:
+            self.temporal_facts = TemporalFactStore(
+                self.knowledge_graph.driver,
+                self.knowledge_graph.database,
+            )
+            await self.temporal_facts.initialize_schema()
+
+    async def _kg_reconnect_loop(self, interval: float = 10.0) -> None:
+        """Background loop: retry Neo4j until it comes up, then finish setup.
+
+        Runs when Neo4j was down at startup (e.g. Neo4j Desktop still
+        booting). Each cycle is a single connect attempt; backoff between
+        cycles is fixed at `interval` seconds.
+        """
+        while True:
+            await asyncio.sleep(interval)
+            if self.knowledge_graph is None:
+                return
+            try:
+                await self.knowledge_graph.connect(retries=0)
+                await self._init_temporal_facts()
+                logger.info("Neo4j reconnected — knowledge graph is now available")
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.debug("Neo4j still unavailable: %s", e)
+
+    async def _warm_wiki_index(self) -> None:
+        """Background warm-up of the wiki vault index (non-blocking)."""
+        try:
+            if self.wiki_adapter:
+                result = await self.wiki_adapter.vault_index.sync()
+                logger.info("Wiki index warmed in background: %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Background wiki index warm-up failed: %s", e)
 
     async def check_health(self) -> dict[str, Any]:
         """Check health of all server components."""
@@ -2001,7 +2057,16 @@ def cleanup_processes() -> None:
     """Clean up all processes and background tasks on shutdown."""
     logger.info("Performing cleanup on server shutdown")
 
-    # Run async cleanup
+    # Run async cleanup. If an event loop is already running (e.g. SIGTERM
+    # arrives mid-serve), asyncio.run() would raise — in that case the
+    # lifespan's `finally: await synapse_server.cleanup()` handles it, so we
+    # just skip here instead of logging a scary error.
+    try:
+        asyncio.get_running_loop()
+        logger.info("Event loop active — cleanup deferred to lifespan handler")
+        return
+    except RuntimeError:
+        pass  # No running loop: safe to use asyncio.run()
     try:
         asyncio.run(synapse_server.cleanup())
     except Exception as e:  # pylint: disable=broad-exception-caught

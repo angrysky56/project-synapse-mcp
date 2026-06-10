@@ -48,34 +48,66 @@ class KnowledgeGraph:
         self.logger = logger
 
     @logger.timer()
-    async def connect(self) -> None:
-        """Establish connection to Neo4j database."""
-        try:
-            driver = AsyncGraphDatabase.driver(
-                self.uri,
-                auth=(self.user, self.password),
-                # Recycle pool connections before NAT/OS idle reapers kill them.
-                # Default is 3600s; 1800s leaves comfortable headroom.
-                max_connection_lifetime=30 * 60,
-                # Cap concurrent connections per process. Default 100; 50 is plenty
-                # for a single MCP server and keeps us friendly to Neo4j.
-                max_connection_pool_size=50,
-                # Fail fast instead of stalling 60s when the pool is wedged.
-                connection_acquisition_timeout=30,
-                # THE fix for "connection doesn't stay alive": ping any connection
-                # that has been idle >30s before reusing it. Without this, dead
-                # sockets sit in the pool and the next query hangs indefinitely.
-                liveness_check_timeout=30,
-                # Explicit TCP keepalive (default true; making it intentional).
-                keep_alive=True,
-            )
-            self.driver = driver
-            await self.check_health()
-            logger.info("Connected to Neo4j database")
-            await self._initialize_schema()
-        except Exception as e:
-            logger.error(f"Failed to connect to Neo4j: {e}")
-            raise
+    async def connect(self, retries: int = 4, base_delay: float = 1.0) -> None:
+        """Establish connection to Neo4j database.
+
+        Retries with exponential backoff (1s, 2s, 4s, 8s by default) so a
+        Neo4j Desktop DBMS that is still booting when the MCP client launches
+        us doesn't hard-kill the server. Auth failures are NOT retried —
+        wrong credentials won't fix themselves.
+
+        Args:
+            retries: Number of retry attempts after the first failure.
+            base_delay: Initial backoff delay in seconds (doubles each retry).
+        """
+        last_error: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                driver = AsyncGraphDatabase.driver(
+                    self.uri,
+                    auth=(self.user, self.password),
+                    # Recycle pool connections before NAT/OS idle reapers kill them.
+                    # Default is 3600s; 1800s leaves comfortable headroom.
+                    max_connection_lifetime=30 * 60,
+                    # Cap concurrent connections per process. Default 100; 50 is plenty
+                    # for a single MCP server and keeps us friendly to Neo4j.
+                    max_connection_pool_size=50,
+                    # Fail fast instead of stalling 60s when the pool is wedged.
+                    connection_acquisition_timeout=30,
+                    # THE fix for "connection doesn't stay alive": ping any connection
+                    # that has been idle >30s before reusing it. Without this, dead
+                    # sockets sit in the pool and the next query hangs indefinitely.
+                    liveness_check_timeout=30,
+                    # Explicit TCP keepalive (default true; making it intentional).
+                    keep_alive=True,
+                )
+                self.driver = driver
+                await self.check_health()
+                logger.info("Connected to Neo4j database")
+                await self._initialize_schema()
+                return
+            except Exception as e:
+                last_error = e
+                # Drop the dead driver so check_health/is_connected stay honest.
+                if self.driver is not None:
+                    try:
+                        await self.driver.close()
+                    except Exception:
+                        pass
+                    self.driver = None
+                # Auth errors are permanent — retrying just spams security logs.
+                if "Unauthorized" in str(e) or "AuthError" in type(e).__name__:
+                    logger.error(f"Neo4j auth failed (not retrying): {e}")
+                    raise
+                if attempt < retries:
+                    delay = base_delay * (2**attempt)
+                    logger.warning(
+                        f"Neo4j not reachable (attempt {attempt + 1}/{retries + 1}): "
+                        f"{e} — retrying in {delay:.0f}s"
+                    )
+                    await asyncio.sleep(delay)
+        logger.error(f"Failed to connect to Neo4j after {retries + 1} attempts: {last_error}")
+        raise last_error if last_error else RuntimeError("Neo4j connect failed")
 
     async def check_health(self) -> bool:
         """Verify Neo4j connectivity and schema readiness."""

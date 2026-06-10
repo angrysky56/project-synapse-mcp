@@ -1,18 +1,22 @@
 """
 Persistent page index for Project Synapse.
 
-Backed by DuckDB, providing incremental sync and fast metadata/search queries.
+Backed by SQLite in WAL mode, providing incremental sync, fast metadata/search
+queries, and fluid multi-process sharing: WAL lets any number of Synapse
+instances read concurrently while writers queue briefly (busy_timeout), so a
+second instance no longer falls back to a throwaway in-memory index the way
+the old DuckDB backend (single-process exclusive lock) forced it to.
 """
 
 import asyncio
 import hashlib
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import yaml
 
 from ..utils.logging_config import get_logger
@@ -32,43 +36,42 @@ class SyncResult:
 
 
 class VaultIndex:
-    """Persistent wiki page index backed by DuckDB."""
+    """Persistent wiki page index backed by SQLite (WAL mode, multi-process safe)."""
 
     def __init__(self, vault_path: Path):
         self.vault_path = Path(vault_path)
-        self.db_path = self.vault_path / ".synapse" / "vault_index.duckdb"
-        self._conn: duckdb.DuckDBPyConnection | None = None
+        self.db_path = self.vault_path / ".synapse" / "vault_index.sqlite3"
+        self._conn: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
+        # Kept for API compatibility; SQLite WAL never needs the in-memory
+        # fallback the DuckDB backend used when another process held the lock.
         self._is_fallback = False
 
-    def _get_connection(self) -> duckdb.DuckDBPyConnection:
-        """Get or open the DuckDB connection."""
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get or open the SQLite connection (WAL mode, autocommit)."""
         if self._conn is None:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                self._conn = duckdb.connect(str(self.db_path))
-                self._is_fallback = False
-            except Exception as e:
-                e_str = str(e)
-                if "lock" in e_str.lower() or "io error" in e_str.lower():
-                    logger.warning(
-                        f"Database file is locked by another process ({e}). "
-                        f"Falling back to an in-memory database. "
-                        f"Changes will not be persisted to the database file."
-                    )
-                    try:
-                        self._conn = duckdb.connect(":memory:")
-                        self._is_fallback = True
-                    except Exception as fallback_err:
-                        logger.error(
-                            f"Failed to open database in-memory: {fallback_err}"
-                        )
-                        raise fallback_err
-                else:
-                    raise
+            # check_same_thread=False: calls run via asyncio.to_thread (pool
+            # threads vary); the asyncio lock already serialises access
+            # within this process. isolation_level=None = autocommit, which
+            # matches the previous DuckDB behaviour.
+            conn = sqlite3.connect(
+                str(self.db_path),
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=10.0,
+            )
+            # WAL: concurrent readers across processes, writers queue briefly.
+            conn.execute("PRAGMA journal_mode=WAL")
+            # Wait up to 5s on a contended write lock instead of erroring.
+            conn.execute("PRAGMA busy_timeout=5000")
+            # NORMAL is durable enough for a rebuildable derived cache and
+            # much faster than FULL during bulk syncs.
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn = conn
 
-            # Setup tables if they don't exist (works for both file and :memory:)
-            self._conn.execute("""
+            # Setup tables if they don't exist
+            self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS pages (
                 path          TEXT PRIMARY KEY,
                 name          TEXT NOT NULL,
@@ -100,12 +103,12 @@ class VaultIndex:
         return self._conn
 
     def close(self) -> None:
-        """Close the DuckDB connection."""
+        """Close the SQLite connection."""
         if self._conn is not None:
             try:
                 self._conn.close()
             except Exception as e:
-                logger.warning(f"Error closing DuckDB: {e}")
+                logger.warning(f"Error closing SQLite index: {e}")
             self._conn = None
 
     async def _execute(self, query: str, params: list[Any] | None = None) -> list[Any]:
@@ -258,7 +261,7 @@ class VaultIndex:
         except Exception as e:
             logger.warning(f"Could not update vault .gitignore: {e}")
 
-        # Initialize DuckDB connection to create tables
+        # Initialize SQLite connection to create tables
         async with self._lock:
             self._get_connection()
 
@@ -266,11 +269,6 @@ class VaultIndex:
         """Incremental filesystem scan to update index."""
         async with self._lock:
             self._get_connection()
-            if self._is_fallback:
-                logger.warning(
-                    "Database is in-memory fallback mode. Syncing to memory. "
-                    "Changes will not be saved to disk."
-                )
 
         # 1. Walk filesystem to find all .md files and get their mtime
         fs_files = {}
@@ -389,7 +387,7 @@ class VaultIndex:
 
                         stmt_params = [(s, t, w) for (s, t), w in deduped.items()]
                         conn.executemany(
-                            "INSERT INTO link_graph (source_slug, target_slug, weight) VALUES (?, ?, ?)",
+                            "INSERT OR REPLACE INTO link_graph (source_slug, target_slug, weight) VALUES (?, ?, ?)",
                             stmt_params,
                         )
 
@@ -557,11 +555,6 @@ class VaultIndex:
         """Upsert a single page metadata into the index."""
         async with self._lock:
             self._get_connection()
-            if self._is_fallback:
-                logger.warning(
-                    f"Database is in-memory fallback mode. Upserting {rel_path} to memory. "
-                    "Changes will not be saved to disk."
-                )
         try:
             parsed = await asyncio.to_thread(self._read_and_parse_file, rel_path)
 
@@ -617,7 +610,7 @@ class VaultIndex:
 
                             stmt_params = [(s, t, w) for (s, t), w in deduped.items()]
                             conn.executemany(
-                                "INSERT INTO link_graph (source_slug, target_slug, weight) VALUES (?, ?, ?)",
+                                "INSERT OR REPLACE INTO link_graph (source_slug, target_slug, weight) VALUES (?, ?, ?)",
                                 stmt_params,
                             )
 
@@ -629,11 +622,6 @@ class VaultIndex:
         """Remove a single page from the index."""
         async with self._lock:
             self._get_connection()
-            if self._is_fallback:
-                logger.warning(
-                    f"Database is in-memory fallback mode. Removing {rel_path} from memory. "
-                    "Changes will not be saved to disk."
-                )
         # Find page slug first
         rows = await self._query_dicts(
             "SELECT name FROM pages WHERE path = ?", [rel_path]
