@@ -170,8 +170,6 @@ class SynapseServer:
                 await self._init_temporal_facts()
                 logger.info("Neo4j reconnected — knowledge graph is now available")
                 return
-            except asyncio.CancelledError:
-                raise
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug("Neo4j still unavailable: %s", e)
 
@@ -181,8 +179,6 @@ class SynapseServer:
             if self.wiki_adapter:
                 result = await self.wiki_adapter.vault_index.sync()
                 logger.info("Wiki index warmed in background: %s", result)
-        except asyncio.CancelledError:
-            raise
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Background wiki index warm-up failed: %s", e)
 
