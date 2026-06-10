@@ -19,13 +19,26 @@ from ..utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# Embedding config — all local, no paid APIs
+# Embedding config.
+# EMBEDDING_PROVIDER: "openrouter" | "ollama" | "local" (sentence-transformers)
+# Any provider failure falls back to local sentence-transformers.
+#
+# IMPORTANT: the Neo4j vector indexes are built with EMBEDDING_DIMENSION.
+# qwen3-embedding-4b is 2560-dim on both Ollama (qwen3-embedding:4b) and
+# OpenRouter (qwen/qwen3-embedding-4b), so switching between those two
+# providers keeps existing stored vectors comparable. Switching to a model
+# with different native dimensions requires re-embedding the graph.
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIMENSION", "2560"))
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "qwen2:7b")
-# Set EMBEDDING_PROVIDER=ollama and OLLAMA_EMBED_MODEL=qwen2:7b to use Ollama
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "ollama")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "qwen2:7b")
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openrouter")
+# Local sentence-transformers fallback model (HuggingFace id)
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+# Ollama
+OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:4b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+# OpenRouter (OpenAI-compatible /embeddings endpoint)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_EMBED_MODEL = os.getenv("OPENROUTER_EMBED_MODEL", "qwen/qwen3-embedding-4b")
 
 
 class KnowledgeGraph:
@@ -228,11 +241,11 @@ class KnowledgeGraph:
         logger.info("Schema initialisation complete")
 
     # ------------------------------------------------------------------
-    # Local embedding (no paid APIs)
+    # Embedding providers
     # ------------------------------------------------------------------
 
     def _get_local_embedder(self) -> Any:
-        """Lazy-load sentence-transformers model."""
+        """Lazy-load sentence-transformers model (fallback provider)."""
         if self._local_embedder is None:
             from sentence_transformers import SentenceTransformer
 
@@ -250,16 +263,28 @@ class KnowledgeGraph:
 
     @logger.timer()
     async def _embed_text(self, text: str) -> list[float]:
-        """Generate embedding locally. Supports sentence-transformers or Ollama."""
+        """Generate embedding via the configured provider.
+
+        Provider order: configured provider (openrouter or ollama) first,
+        then local sentence-transformers as the always-available fallback.
+        """
         res_vec = None
-        if EMBEDDING_PROVIDER == "ollama":
+        if EMBEDDING_PROVIDER == "openrouter":
+            try:
+                res_vec = await self._embed_via_openrouter(text)
+            except Exception as e:
+                logger.warning(f"OpenRouter embed failed, falling back to local: {e}")
+        elif EMBEDDING_PROVIDER == "ollama":
             try:
                 res_vec = await self._embed_via_ollama(text)
             except Exception as e:
                 logger.warning(f"Ollama embed failed, falling back to local: {e}")
 
         if res_vec is None:
-            # Default: sentence-transformers (runs on GPU if available)
+            # Fallback: sentence-transformers (runs on GPU if available).
+            # NOTE: fallback vectors live in a different embedding space than
+            # provider vectors — fine for transient outages, but don't run on
+            # the fallback for bulk ingestion.
             model = self._get_local_embedder()
             loop = asyncio.get_running_loop()
             vec = await loop.run_in_executor(None, model.encode, text)
@@ -285,6 +310,26 @@ class KnowledgeGraph:
             async with session.post(url, json=payload) as resp:
                 data = await resp.json()
                 return cast(list[float], data["embeddings"][0])
+
+    async def _embed_via_openrouter(self, text: str) -> list[float]:
+        """Get embedding from OpenRouter (OpenAI-compatible /embeddings)."""
+        import aiohttp
+
+        if not OPENROUTER_API_KEY:
+            raise RuntimeError("OPENROUTER_API_KEY not set")
+        url = f"{OPENROUTER_BASE_URL}/embeddings"
+        payload = {"model": OPENROUTER_EMBED_MODEL, "input": text}
+        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+        timeout = aiohttp.ClientTimeout(total=30, connect=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                data = await resp.json()
+                if resp.status != 200 or "data" not in data:
+                    raise RuntimeError(
+                        f"OpenRouter embeddings HTTP {resp.status}: "
+                        f"{str(data)[:200]}"
+                    )
+                return cast(list[float], data["data"][0]["embedding"])
 
     # ------------------------------------------------------------------
     # Store operations
