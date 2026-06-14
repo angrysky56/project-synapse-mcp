@@ -135,7 +135,9 @@ async def test_cluster_wiki_pages_capping(temp_vault):
     # Create 20 pages in wiki with no links between them so they generate a lot of missing links
     for i in range(20):
         page_path = adapter.wiki_dir / f"page_{i}.md"
-        page_path.write_text(f"---\ntitle: Page {i}\nsummary: Summary {i}\n---\nThis is body content for page {i} to ensure we have enough similarity and words to cluster.")
+        page_path.write_text(
+            f"---\ntitle: Page {i}\nsummary: Summary {i}\n---\nThis is body content for page {i} to ensure we have enough similarity and words to cluster."
+        )
 
     # Run clustering with 1 cluster so all pages end in the same cluster
     result = await adapter.cluster_wiki_pages(n_clusters=1)
@@ -147,3 +149,13 @@ async def test_cluster_wiki_pages_capping(temp_vault):
     assert len(cluster["missing_links"]) <= 15
     # Total missing links should be 20 * 19 / 2 = 190
     assert cluster["total_missing_links"] == 190
+
+
+@pytest.mark.asyncio
+async def test_initialize_does_not_write_health_probe(temp_vault):
+    """Test that WikiAdapter.initialize() does not write probe files to the vault."""
+    adapter = WikiAdapter(vault_path=str(temp_vault))
+    await adapter.initialize()
+
+    health_file = temp_vault / ".synapse_health"
+    assert not health_file.exists(), "initialize() should not create .synapse_health"

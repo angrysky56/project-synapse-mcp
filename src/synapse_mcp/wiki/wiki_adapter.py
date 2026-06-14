@@ -67,35 +67,30 @@ class WikiAdapter:
         if not self.vault_path or not self.vault_path.exists():
             logger.warning("Wiki vault path not found: %s", self.vault_path)
             return
-        for d in [self.raw_dir, self.wiki_dir]:
-            d.mkdir(parents=True, exist_ok=True)
-        await self.vault_index.initialize()
-        # NOTE: no vault_index.sync() here — a full scan of a large vault
-        # takes 25s+ and blocks MCP startup past the client's handshake
-        # timeout. Wiki tools sync lazily on first use, and the server warms
-        # the index in a background task right after startup.
-        await self.check_health()
-        logger.info("Wiki adapter initialised – vault: %s", self.vault_path)
+        try:
+            for d in [self.raw_dir, self.wiki_dir]:
+                d.mkdir(parents=True, exist_ok=True)
+            await self.vault_index.initialize()
+            # NOTE: no vault_index.sync() here — a full scan of a large vault
+            # takes 25s+ and blocks MCP startup past the client's handshake
+            # timeout. Wiki tools sync lazily on first use, and the server warms
+            # the index in a background task right after startup.
+            logger.info("Wiki adapter initialised – vault: %s", self.vault_path)
+        except Exception as e:
+            logger.warning(
+                "Wiki adapter initialization failed: %s. Starting in degraded mode.",
+                e,
+            )
 
     async def check_health(self) -> bool:
-        """Verify wiki vault accessibility and write permissions."""
+        """Verify wiki vault is accessible."""
         if not self.vault_path:
             raise RuntimeError("Wiki vault path not configured")
         if not self.vault_path.exists():
             raise RuntimeError(f"Wiki vault path does not exist: {self.vault_path}")
         if not self.vault_path.is_dir():
             raise RuntimeError(f"Wiki vault path is not a directory: {self.vault_path}")
-
-        # Check write permissions by attempting to write a tiny hidden file
-        health_file = self.vault_path / ".synapse_health"
-        try:
-            async with aiofiles.open(health_file, "w") as f:
-                await f.write("ok")
-            health_file.unlink()
-            return True
-        except Exception as e:
-            logger.error(f"Wiki health check failed (write permission): {e}")
-            raise RuntimeError(f"Wiki vault is not writable: {str(e)}") from e
+        return True
 
     # ------------------------------------------------------------------
     # Page CRUD

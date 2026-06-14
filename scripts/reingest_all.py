@@ -8,17 +8,18 @@ import asyncio
 import os
 import sys
 import time
-from pathlib import Path
 from collections import Counter
+from pathlib import Path
 
 # Load .env
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).parent / ".env")
 
 from neo4j import AsyncGraphDatabase
 
-from synapse_mcp.data_pipeline.semantic_integrator import SemanticIntegrator
 from synapse_mcp.core.knowledge_graph import KnowledgeGraph
+from synapse_mcp.data_pipeline.semantic_integrator import SemanticIntegrator
 
 wiki_vault_path = os.getenv("WIKI_VAULT_PATH")
 if wiki_vault_path:
@@ -37,7 +38,9 @@ NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "synapse")
 async def wipe_graph(driver) -> int:
     """Wipe all nodes and edges. Returns count of deleted nodes."""
     async with driver.session(database=NEO4J_DATABASE) as session:
-        result = await session.run("MATCH (n) DETACH DELETE n RETURN count(n) AS deleted")
+        result = await session.run(
+            "MATCH (n) DETACH DELETE n RETURN count(n) AS deleted"
+        )
         records = await result.data()
         return records[0]["deleted"] if records else 0
 
@@ -59,7 +62,9 @@ async def read_stats(driver) -> dict:
         stats["rel_types"] = await result.data()
 
         # Total counts
-        result = await session.run("MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC")
+        result = await session.run(
+            "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC"
+        )
         stats["totals"] = await result.data()
 
     return stats
@@ -121,7 +126,12 @@ async def ingest_file(
     except Exception as e:
         elapsed = time.time() - t0
         print(f"  [{idx:3d}/{total}] {source_name[:50]:50s}  ERROR: {e}")
-        return {"file": source_name, "status": "error", "error": str(e), "seconds": elapsed}
+        return {
+            "file": source_name,
+            "status": "error",
+            "error": str(e),
+            "seconds": elapsed,
+        }
 
 
 def _detect_type(filepath: Path) -> str:
@@ -190,7 +200,7 @@ async def main():
     total_fact = sum(r.get("facts", 0) for r in ok)
 
     print(f"\n{'='*60}")
-    print(f"RE-INGEST COMPLETE")
+    print("RE-INGEST COMPLETE")
     print(f"{'='*60}")
     print(f"Files: {len(ok)} ok, {len(errors)} errors, {len(skipped)} skipped")
     print(f"Total entities:      {total_ent:,}")
@@ -201,7 +211,7 @@ async def main():
 
     # Graph stats
     if not DRY_RUN:
-        print(f"\n--- Neo4j Graph Statistics ---")
+        print("\n--- Neo4j Graph Statistics ---")
         stats = await read_stats(driver)
 
         print("\nNode totals:")
@@ -218,7 +228,7 @@ async def main():
             print(f"  {rtype:20s} {row['count']:,}")
 
     if errors:
-        print(f"\nErrors:")
+        print("\nErrors:")
         for e in errors:
             print(f"  {e['file']}: {e.get('error', 'unknown')}")
 
