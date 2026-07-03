@@ -1,5 +1,7 @@
 import asyncio
+
 from synapse_mcp.semantic.montague_parser import MontagueParser
+
 
 async def main():
     parser = MontagueParser()

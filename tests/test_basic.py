@@ -4,14 +4,11 @@ Test suite for Project Synapse MCP Server.
 Basic tests to verify installation and core functionality.
 """
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 # Import the modules to test
 from synapse_mcp.data_pipeline.text_processor import TextProcessor
-from synapse_mcp.semantic.montague_parser import MontagueParser
 from synapse_mcp.utils.logging_config import setup_logging
 
 

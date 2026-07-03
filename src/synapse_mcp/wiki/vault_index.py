@@ -302,7 +302,10 @@ class VaultIndex:
                 to_add_update.append(rel_path)
             else:
                 db_mtime, _ = db_files[rel_path]
-                if abs(mtime - db_mtime) > 0.01:
+                # 1µs tolerance: SQLite stores the float64 mtime exactly
+                # (the old 10ms slack was a DuckDB round-trip artifact and
+                # made edits within 10ms of the last sync invisible).
+                if abs(mtime - db_mtime) > 1e-6:
                     to_add_update.append(rel_path)
 
         for rel_path in db_files:

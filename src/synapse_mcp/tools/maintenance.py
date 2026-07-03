@@ -69,5 +69,97 @@ async def resolve_entities() -> None:
         raise
 
 
+async def reembed_degraded(dry_run: bool = False) -> None:
+    """Find and re-embed nodes whose vectors came from the local fallback.
+
+    The local sentence-transformers fallback produces 384-dim vectors that
+    get zero-padded to EMBEDDING_DIMENSION. Real provider vectors (qwen3
+    2560-dim) essentially never contain a long run of exact zeros, so a
+    node whose embedding tail beyond index 1024 is all zeros was embedded
+    by the fallback (or padded from another short model) and is invisible
+    to semantic search. This re-embeds those nodes with the configured
+    provider. Also repairs nodes with a missing embedding.
+
+    Run only while the embedding provider is healthy.
+    """
+    from synapse_mcp.core.knowledge_graph import KnowledgeGraph
+
+    # (label, id property, cypher expression producing the text to embed)
+    targets = [
+        ("Fact", "id", "n.content"),
+        ("Entity", "id", "n.name + ' (' + coalesce(n.type, '') + ')'"),
+        ("Zettel", "id", "n.content"),
+    ]
+
+    kg = KnowledgeGraph()
+    await kg.connect()
+    assert kg.driver is not None
+
+    total_fixed = 0
+    try:
+        async with kg.driver.session(database=kg.database) as session:
+            for label, id_prop, text_expr in targets:
+                find_query = f"""
+                MATCH (n:{label})
+                WHERE n.embedding IS NULL
+                   OR all(x IN n.embedding[1024..] WHERE x = 0.0)
+                RETURN n.{id_prop} AS id, {text_expr} AS text
+                """
+                result = await session.run(find_query)  # type: ignore[arg-type]
+                rows = await result.data()
+                print(f"{label}: {len(rows)} degraded/missing embeddings found")
+
+                if dry_run:
+                    continue
+
+                for row in rows:
+                    if not row["text"]:
+                        continue
+                    vec = await kg._embed_text(row["text"])
+                    await session.run(
+                        f"MATCH (n:{label} {{{id_prop}: $id}}) "  # type: ignore[arg-type]
+                        "CALL db.create.setNodeVectorProperty(n, 'embedding', $vec)",
+                        {"id": row["id"], "vec": vec},
+                    )
+                    total_fixed += 1
+
+        if kg._fallback_embed_count > 0:
+            print(
+                f"WARNING: the fallback embedder fired {kg._fallback_embed_count} "
+                "times during re-embedding — the provider is still unhealthy. "
+                "Those nodes remain degraded; re-run later."
+            )
+        print(f"Re-embedded {total_fixed} nodes." if not dry_run else "Dry run only.")
+    finally:
+        await kg.close()
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Synapse maintenance tasks")
+    parser.add_argument(
+        "--reembed",
+        action="store_true",
+        help="Re-embed nodes stored with degraded fallback vectors",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Report degraded nodes, change nothing"
+    )
+    parser.add_argument(
+        "--resolve-entities",
+        action="store_true",
+        help="Retroactively refine entity types",
+    )
+    args = parser.parse_args()
+
+    if args.reembed:
+        asyncio.run(reembed_degraded(dry_run=args.dry_run))
+    elif args.resolve_entities:
+        asyncio.run(resolve_entities())
+    else:
+        parser.print_help()
+
+
 if __name__ == "__main__":
-    asyncio.run(resolve_entities())
+    main()

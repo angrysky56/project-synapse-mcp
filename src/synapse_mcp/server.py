@@ -12,6 +12,7 @@ import atexit
 
 # trunk-ignore(bandit/B404)
 import json
+import logging
 import os
 import re
 import shutil
@@ -594,19 +595,13 @@ async def query_knowledge(
         synapse = ctx.request_context.lifespan_context["synapse"]
         synapse.set_context(ctx)
 
-        # --- Stage 1: Entity extraction → graph seed ---
-        # Extract named entities from query and pull directly connected facts.
-        # These are high-precision hits that bypass vector similarity entirely.
-        entity_facts: list[dict[str, Any]] = []
-        if synapse.knowledge_graph:
-            query_entities = await synapse.knowledge_graph.extract_query_entities(query)
-            if query_entities:
-                await ctx.info(f"Query entities found: {', '.join(query_entities)}")
-                entity_facts = await synapse.knowledge_graph.query_by_entities(
-                    query_entities, depth=1
-                )
-
-        # --- Stage 2: Hybrid RRF retrieval (vector ANN + BM25) ---
+        # --- Stage 1+2: Hybrid RRF retrieval ---
+        # query_hybrid() already fuses entity-graph seeds, vector ANN, and
+        # fulltext BM25 via Reciprocal Rank Fusion. Running a separate
+        # entity pass here and force-merging it to the front (as older
+        # versions did) doubled the Neo4j/spaCy work and let any fact
+        # merely *mentioning* a query entity outrank genuinely relevant
+        # hits. Trust the fusion.
         facts = await synapse.knowledge_graph.query_hybrid(
             query, max_results=max_results
         )
@@ -636,11 +631,7 @@ async def query_knowledge(
                 query, max_results=max_results // 2
             )
 
-        # --- Merge entity hits to front of fact list ---
-        entity_statements = {e["statement"] for e in entity_facts}
-        merged_facts = list(entity_facts) + [
-            f for f in facts if f["statement"] not in entity_statements
-        ]
+        merged_facts = facts
 
         # --- Format output ---
         result_buffer = ["🔍 **Knowledge Query Results**\n\n"]
@@ -657,9 +648,13 @@ async def query_knowledge(
         if merged_facts:
             result_buffer.append("**📊 Factual Information:**\n\n")
             for fact in merged_facts[:max_results]:
-                path = fact.get("retrieval_path", "hybrid")
+                sources = fact.get("retrieval_sources") or [
+                    fact.get("retrieval_path", "hybrid")
+                ]
                 score = fact.get("rrf_score") or fact.get("similarity", 0)
-                tag = f" `[{path}]`" if path == "entity_graph" else ""
+                # Facts confirmed by 2+ retrieval paths are the strongest
+                # signal — surface which paths agreed.
+                tag = f" `[{'+'.join(sources)}]`" if sources else ""
                 result_buffer.append(
                     f"- {fact['statement']}{tag}\n"
                     f"  *Source:* {fact['source']} | *Score:* {score:.4f}\n\n"
@@ -2056,6 +2051,11 @@ for strengthening the insight if needed."""
 
 def cleanup_processes() -> None:
     """Clean up all processes and background tasks on shutdown."""
+    # At atexit time stderr may already be closed (e.g. under pytest or
+    # when the MCP client tears down the pipe). Silence the logging
+    # module's "--- Logging error ---" tracebacks about closed streams —
+    # there is nowhere useful for them to go at this point anyway.
+    logging.raiseExceptions = False
     logger.info("Performing cleanup on server shutdown")
 
     # Run async cleanup. If an event loop is already running (e.g. SIGTERM

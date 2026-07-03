@@ -6,9 +6,7 @@ Wipes the Neo4j graph first, then processes all clipping files.
 
 import asyncio
 import os
-import sys
 import time
-from collections import Counter
 from pathlib import Path
 
 # Load .env

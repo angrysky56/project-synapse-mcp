@@ -58,6 +58,7 @@ class KnowledgeGraph:
         self.database = os.getenv("NEO4J_DATABASE", "neo4j")
         self._local_embedder: Any = None  # lazy-loaded
         self._nlp: Any = None  # lazy-loaded for entity extraction
+        self._fallback_embed_count = 0  # degraded-embedding diagnostics
         self.logger = logger
 
     @logger.timer()
@@ -263,28 +264,64 @@ class KnowledgeGraph:
 
     @logger.timer()
     async def _embed_text(self, text: str) -> list[float]:
-        """Generate embedding via the configured provider.
+        """Generate embedding, preserving one consistent vector space.
 
-        Provider order: configured provider (openrouter or ollama) first,
-        then local sentence-transformers as the always-available fallback.
+        Both providers serve qwen3-embedding-4b (2560-dim), so their vectors
+        are interchangeable. Order:
+
+        1. Configured EMBEDDING_PROVIDER, retried once after a short backoff
+           (OpenRouter 429 "engine overloaded" is usually transient).
+        2. The *other* qwen provider (openrouter <-> ollama) — same
+           embedding space, so falling back here is completely harmless.
+        3. sentence-transformers — DIFFERENT space, loud warning, last
+           resort only. Nodes stored this way need --reembed later.
         """
+        primary, secondary = {
+            "openrouter": (self._embed_via_openrouter, self._embed_via_ollama),
+            "ollama": (self._embed_via_ollama, self._embed_via_openrouter),
+        }.get(EMBEDDING_PROVIDER, (None, None))
+
         res_vec = None
-        if EMBEDDING_PROVIDER == "openrouter":
+        if primary is not None:
+            for attempt in range(2):
+                try:
+                    res_vec = await primary(text)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        logger.debug("Primary embed attempt failed, retrying: %s", e)
+                        await asyncio.sleep(1.5)
+                    else:
+                        logger.warning(
+                            "Primary embedder (%s) failed twice: %s — trying "
+                            "same-space fallback provider",
+                            EMBEDDING_PROVIDER,
+                            e,
+                        )
+        if res_vec is None and secondary is not None:
             try:
-                res_vec = await self._embed_via_openrouter(text)
+                res_vec = await secondary(text)
             except Exception as e:
-                logger.warning(f"OpenRouter embed failed, falling back to local: {e}")
-        elif EMBEDDING_PROVIDER == "ollama":
-            try:
-                res_vec = await self._embed_via_ollama(text)
-            except Exception as e:
-                logger.warning(f"Ollama embed failed, falling back to local: {e}")
+                logger.warning(f"Same-space fallback provider also failed: {e}")
 
         if res_vec is None:
             # Fallback: sentence-transformers (runs on GPU if available).
-            # NOTE: fallback vectors live in a different embedding space than
-            # provider vectors — fine for transient outages, but don't run on
-            # the fallback for bulk ingestion.
+            # NOTE: fallback vectors live in a DIFFERENT embedding space than
+            # provider vectors and get zero-padded to EMBEDDING_DIM below.
+            # Any Fact stored with a fallback vector is effectively invisible
+            # to semantic search against provider-embedded queries (and vice
+            # versa). Track how often this happens so degraded retrieval
+            # quality is diagnosable instead of silent.
+            self._fallback_embed_count += 1
+            logger.warning(
+                "Using local fallback embedder (occurrence #%d this session). "
+                "Vectors stored now will NOT be comparable with '%s' vectors — "
+                "retrieval quality degrades. Run "
+                "`python -m synapse_mcp.tools.maintenance --reembed` once the "
+                "provider is healthy again.",
+                self._fallback_embed_count,
+                EMBEDDING_PROVIDER,
+            )
             model = self._get_local_embedder()
             loop = asyncio.get_running_loop()
             vec = await loop.run_in_executor(None, model.encode, text)
@@ -304,8 +341,11 @@ class KnowledgeGraph:
         url = f"{OLLAMA_BASE_URL}/api/embed"
         payload = {"model": OLLAMA_EMBED_MODEL, "input": text}
         # Bound the request so a dead Ollama doesn't hang the whole pipeline
-        # (aiohttp's default total timeout is 5 minutes).
-        timeout = aiohttp.ClientTimeout(total=30, connect=5)
+        # (aiohttp's default total timeout is 5 minutes). Default of 60s
+        # leaves room for the first request after a cold model load; tune
+        # via OLLAMA_EMBED_TIMEOUT.
+        embed_timeout = float(os.getenv("OLLAMA_EMBED_TIMEOUT", "60"))
+        timeout = aiohttp.ClientTimeout(total=embed_timeout, connect=5)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload) as resp:
                 data = await resp.json()

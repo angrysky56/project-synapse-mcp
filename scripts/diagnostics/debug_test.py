@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 # Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 
 async def test_semantic_integrator():
@@ -30,7 +30,7 @@ async def test_semantic_integrator():
         test_text = "Machine learning is powerful."
         result = await integrator.process_text_with_semantics(test_text, "test")
 
-        print(f"✅ Semantic integrator test passed!")
+        print("✅ Semantic integrator test passed!")
         print(f"   Entities: {len(result['entities'])}")
         print(f"   Relationships: {len(result['relationships'])}")
         print(f"   Facts: {len(result['facts'])}")

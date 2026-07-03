@@ -4,7 +4,6 @@ Quick test script to verify Project Synapse setup and basic functionality.
 """
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -119,7 +118,6 @@ async def test_knowledge_types():
         from synapse_mcp.knowledge.knowledge_types import (
             Entity,
             Fact,
-            Insight,
             KnowledgeUtils,
         )
 

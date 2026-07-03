@@ -68,6 +68,15 @@ target-version = "py310"
 select = ["E", "F", "I", "N", "W", "UP"]
 ignore = ["E501"]  # Line length handled by formatter
 
+[tool.ruff.lint.per-file-ignores]
+# Tests and scripts legitimately insert sys.path before importing the package.
+"tests/**" = ["E402"]
+"scripts/**" = ["E402"]
+# Runnable CLI tools do the same sys.path dance.
+"src/synapse_mcp/tools/*" = ["E402"]
+# test_setup.py exists to verify imports resolve — "unused" imports are the test.
+"tests/test_setup.py" = ["F401"]
+
 [tool.black]
 line-length = 88
 target-version = ['py310']
@@ -82,4 +91,6 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-python_files = ["test_*.py", "*_test.py"]
+# test_*.py only — the old "*_test.py" pattern also collected manual debug
+# scripts (debug_test.py, step_by_step_test.py) that hang or sys.exit().
+python_files = ["test_*.py"]

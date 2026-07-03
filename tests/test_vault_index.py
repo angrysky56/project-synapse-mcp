@@ -1,5 +1,3 @@
-import json
-from pathlib import Path
 
 import pytest
 
@@ -208,12 +206,19 @@ async def test_vault_index_write_through(temp_vault):
 
 
 @pytest.mark.asyncio
-async def test_vault_index_concurrency_fallback(temp_vault):
-    """Test that VaultIndex falls back to read-only mode if DB is locked by another process."""
+async def test_vault_index_multiprocess_concurrency(temp_vault):
+    """Two processes can use the SQLite/WAL index simultaneously.
+
+    The old version of this test asserted an in-memory *fallback* kicked
+    in when another process held a DuckDB write lock. The index migrated
+    to SQLite in WAL mode, where cross-process concurrency is supported
+    directly — so the correct assertion now is that a second process
+    holding an open connection does NOT degrade this process's index.
+    """
     import subprocess
     import sys
 
-    db_path = temp_vault / ".synapse" / "vault_index.duckdb"
+    db_path = temp_vault / ".synapse" / "vault_index.sqlite3"
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # 1. Pre-initialize the database so it exists
@@ -221,70 +226,56 @@ async def test_vault_index_concurrency_fallback(temp_vault):
     await index_writer.initialize()
     index_writer.close()
 
-    # 2. Spawn a separate process to hold the write lock
+    # 2. Spawn a separate process holding an open connection that has
+    #    recently written (WAL allows concurrent readers/writers).
     lock_code = (
-        "import duckdb, time, sys\n"
-        "try:\n"
-        "    conn = duckdb.connect(sys.argv[1])\n"
-        "    conn.execute('CREATE TABLE IF NOT EXISTS hold_table (val INTEGER)')\n"
-        "    print('READY', flush=True)\n"
-        "    time.sleep(5)\n"
-        "except Exception as e:\n"
-        "    print(f'ERROR: {e}', flush=True)\n"
-        "    sys.exit(1)\n"
+        "import sqlite3, time, sys\n"
+        "conn = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "conn.execute('PRAGMA journal_mode=WAL')\n"
+        "conn.execute('CREATE TABLE IF NOT EXISTS hold_table (val INTEGER)')\n"
+        "conn.execute('INSERT INTO hold_table VALUES (1)')\n"
+        "print('READY', flush=True)\n"
+        "time.sleep(10)\n"
     )
 
     proc = subprocess.Popen(
         [sys.executable, "-c", lock_code, str(db_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
     )
 
-    # Wait for the subprocess to initialize and lock the DB
     try:
-        # Read the first line of output
         ready_line = proc.stdout.readline().strip()
-        assert ready_line == "READY", f"Subprocess failed to start: {proc.stderr.read()}"
+        assert ready_line == "READY", (
+            f"Subprocess failed to start: {proc.stderr.read()}"
+        )
 
-        # 3. Setup a reader index pointing to the same DB in our process
-        index_reader = VaultIndex(temp_vault)
-        await index_reader.initialize()
+        # 3. Our index must initialize and stay fully functional — no
+        #    fallback, real reads AND writes against the shared DB.
+        index = VaultIndex(temp_vault)
+        await index.initialize()
+        assert index._is_fallback is False
 
-        # The reader should fall back to in-memory fallback mode because subprocess holds lock
-        assert index_reader._is_fallback is True
-
-        # 4. Reading should still be functional on the reader
-        res = await index_reader.list_pages(subdir="wiki")
+        res = await index.list_pages(subdir="wiki")
         assert isinstance(res, dict)
         assert "pages" in res
 
-        # 5. Create a dummy page in vault and sync (should write successfully to in-memory DB)
         page_path = temp_vault / "wiki" / "some_page.md"
-        page_path.write_text("---\nsummary: Test fallback\n---\nHello in-memory")
+        page_path.write_text("---\nsummary: Concurrent write\n---\nHello WAL")
 
-        sync_res = await index_reader.sync()
+        sync_res = await index.sync()
         assert sync_res.added == 1
         assert sync_res.total == 1
 
-        # 6. Verify we can retrieve the page meta from index
-        meta = await index_reader.get_page_meta("wiki/some_page.md")
+        meta = await index.get_page_meta("wiki/some_page.md")
         assert meta is not None
-        assert meta["summary"] == "Test fallback"
+        assert meta["summary"] == "Concurrent write"
 
-        # 7. Modify page and upsert (should also work in-memory)
-        page_path.write_text("---\nsummary: Test fallback modified\n---\nHello in-memory")
-        await index_reader.upsert_page("wiki/some_page.md")
-        meta_mod = await index_reader.get_page_meta("wiki/some_page.md")
-        assert meta_mod["summary"] == "Test fallback modified"
+        await index.remove_page("wiki/some_page.md")
+        assert await index.get_page_meta("wiki/some_page.md") is None
 
-        # 8. Remove page (should also work in-memory)
-        await index_reader.remove_page("wiki/some_page.md")
-        meta_del = await index_reader.get_page_meta("wiki/some_page.md")
-        assert meta_del is None
-
-        index_reader.close()
+        index.close()
     finally:
-        # Terminate the subprocess
         proc.terminate()
         proc.wait()
