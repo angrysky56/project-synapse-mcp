@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from mcp.server.mcpserver import Context, MCPServer as FastMCP
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver import MCPServer as FastMCP
 from mcp.server.mcpserver.prompts import base
 
 # Import our core modules
