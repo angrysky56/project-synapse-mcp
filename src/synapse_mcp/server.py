@@ -27,8 +27,8 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.prompts import base
+from mcp.server.mcpserver import Context, MCPServer as FastMCP
+from mcp.server.mcpserver.prompts import base
 
 # Import our core modules
 from .core.knowledge_graph import KnowledgeGraph
